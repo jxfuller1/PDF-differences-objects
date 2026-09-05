@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pymupdf as fitz
 
-from .models import BBox, Change, ChangeType, ComparisonResult
+from pdf_differences.models import BBox, Change, ChangeType, ComparisonResult
 
 _COLORS: dict[ChangeType, tuple[float, float, float]] = {
     ChangeType.ADDED: (0.12, 0.63, 0.29),

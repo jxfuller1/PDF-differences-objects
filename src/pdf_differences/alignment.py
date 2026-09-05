@@ -9,8 +9,8 @@ from collections.abc import Callable, Iterable
 
 import numpy as np
 
-from .config import SETTINGS, ComparisonSettings
-from .models import AlignmentResult, BBox, Entity, EntityKind, Point, Transform
+from pdf_differences.config import SETTINGS, ComparisonSettings
+from pdf_differences.models import AlignmentResult, BBox, Entity, EntityKind, Point, Transform
 
 AnchorPair = tuple[Point, Point]
 

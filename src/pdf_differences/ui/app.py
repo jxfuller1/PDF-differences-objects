@@ -29,10 +29,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..models import Change, ChangeCategory, ChangeType, ComparisonResult
-from ..reporting import export_annotated_pdf, export_csv, export_json
-from .viewer import PageViewer
-from .worker import ComparisonWorker
+from pdf_differences.models import Change, ChangeCategory, ChangeType, ComparisonResult
+from pdf_differences.reporting import export_annotated_pdf, export_csv, export_json
+from pdf_differences.ui.viewer import PageViewer
+from pdf_differences.ui.worker import ComparisonWorker
 
 _ROW_COLORS = {
     ChangeType.ADDED: QColor("#147a3b"),

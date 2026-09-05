@@ -6,9 +6,9 @@ import argparse
 import sys
 from pathlib import Path
 
-from .comparison import compare_pdfs
-from .errors import PdfDifferencesError
-from .reporting import export_annotated_pdf, export_csv, export_json
+from pdf_differences.comparison import compare_pdfs
+from pdf_differences.errors import PdfDifferencesError
+from pdf_differences.reporting import export_annotated_pdf, export_csv, export_json
 
 
 def _parser() -> argparse.ArgumentParser:

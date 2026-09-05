@@ -7,8 +7,13 @@ import re
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .config import ADMIN_REVISION_KEYWORDS, INSPECTION_KEYWORDS, SETTINGS, ComparisonSettings
-from .models import BBox, ChangeCategory, Entity, EntityKind
+from pdf_differences.config import (
+    ADMIN_REVISION_KEYWORDS,
+    INSPECTION_KEYWORDS,
+    SETTINGS,
+    ComparisonSettings,
+)
+from pdf_differences.models import BBox, ChangeCategory, Entity, EntityKind
 
 _GDT_SYMBOLS = frozenset("⌖⏥⏊∥⌭⌒⌓○⌀ⓂⓁⓈ")
 _GDT_WORDS = re.compile(

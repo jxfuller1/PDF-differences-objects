@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pymupdf as fitz
 
-from .alignment import estimate_alignment, transform_bbox
-from .config import SETTINGS, ComparisonSettings
-from .errors import AlignmentError, ComparisonCancelled
-from .extraction import extract_page_entities
-from .matching import match_entities
-from .mechanical import Interpretation, interpret_change
-from .models import (
+from pdf_differences.alignment import estimate_alignment, transform_bbox
+from pdf_differences.config import SETTINGS, ComparisonSettings
+from pdf_differences.errors import AlignmentError, ComparisonCancelled
+from pdf_differences.extraction import extract_page_entities
+from pdf_differences.matching import match_entities
+from pdf_differences.mechanical import Interpretation, interpret_change
+from pdf_differences.models import (
     AlignmentResult,
     BBox,
     Change,
@@ -29,7 +29,7 @@ from .models import (
     ProgressEvent,
     Transform,
 )
-from .validation import PdfCapabilities, validate_pdf
+from pdf_differences.validation import PdfCapabilities, validate_pdf
 
 ProgressCallback = Callable[[ProgressEvent], None]
 CancelCallback = Callable[[], bool]

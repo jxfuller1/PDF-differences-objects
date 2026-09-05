@@ -10,7 +10,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QWheelEvent
 from PyQt6.QtWidgets import QGraphicsScene, QGraphicsView
 
-from ..models import Change, ChangeType
+from pdf_differences.models import Change, ChangeType
 
 _COLORS = {
     ChangeType.ADDED: QColor("#219653"),

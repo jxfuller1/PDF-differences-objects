@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pymupdf as fitz
 
-from .config import SETTINGS, ComparisonSettings
-from .errors import PdfValidationError, RasterPdfError
+from pdf_differences.config import SETTINGS, ComparisonSettings
+from pdf_differences.errors import PdfValidationError, RasterPdfError
 
 
 @dataclass(frozen=True, slots=True)

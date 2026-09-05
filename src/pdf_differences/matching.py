@@ -18,10 +18,18 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import min_weight_full_bipartite_matching
 from scipy.spatial import cKDTree
 
-from .alignment import registered_distance, transform_bbox, transform_point
-from .config import SETTINGS, ComparisonSettings
-from .mechanical import classify_text
-from .models import BBox, Entity, EntityKind, EntityMatch, MatchResult, MatchTier, Transform
+from pdf_differences.alignment import registered_distance, transform_bbox, transform_point
+from pdf_differences.config import SETTINGS, ComparisonSettings
+from pdf_differences.mechanical import classify_text
+from pdf_differences.models import (
+    BBox,
+    Entity,
+    EntityKind,
+    EntityMatch,
+    MatchResult,
+    MatchTier,
+    Transform,
+)
 
 
 def _ratio(first: float, second: float) -> float:

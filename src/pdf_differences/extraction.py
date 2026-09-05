@@ -13,7 +13,7 @@ from typing import Any
 
 import pymupdf as fitz
 
-from .models import BBox, Entity, EntityKind, Point
+from pdf_differences.models import BBox, Entity, EntityKind, Point
 
 _ROUND = 6
 

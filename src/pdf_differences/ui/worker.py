@@ -6,8 +6,8 @@ from threading import Event
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
-from ..comparison import compare_pdfs
-from ..errors import ComparisonCancelled
+from pdf_differences.comparison import compare_pdfs
+from pdf_differences.errors import ComparisonCancelled
 
 
 class ComparisonWorker(QObject):
