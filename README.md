@@ -111,7 +111,8 @@ Regenerate it with `python tools/generate_sample.py`.
 Alignment uses unique unchanged text and geometry signatures to estimate a
 translation/rotation/uniform-scale transform. Comparisons are declined when a
 populated page has enough anchors but no reliable transform, instead of emitting
-a misleading whole-sheet change.
+a misleading whole-sheet change. When fewer than two anchors are available, the
+viewer safely overlays the page frames without applying an unverified translation.
 
 ## Mechanical parser and relevance
 

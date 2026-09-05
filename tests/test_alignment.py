@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import math
-
 import pytest
 
 from pdf_differences.alignment import estimate_alignment, transform_point
@@ -43,13 +41,15 @@ def test_recovers_similarity_transform_from_unique_text_anchors():
     assert result.transform.ty == pytest.approx(expected.ty, abs=1e-7)
 
 
-def test_single_anchor_estimates_translation_only():
+def test_single_anchor_uses_page_frame_instead_of_unverified_translation():
     old = (_entity("a", "UNIQUE", (0.2, 0.3)),)
     new = (_entity("b", "UNIQUE", (0.25, 0.28)),)
     result = estimate_alignment(old, new)
-    assert result.status == "translation-only"
-    assert math.isclose(result.transform.tx, 0.05)
-    assert math.isclose(result.transform.ty, -0.02)
+    assert result.status == "identity-unverified"
+    assert result.anchor_count == 1
+    assert result.inlier_count == 0
+    assert result.transform == Transform()
+    assert "page frames were overlaid" in result.note
 
 
 def test_inconsistent_anchor_correspondences_fail_instead_of_guessing():

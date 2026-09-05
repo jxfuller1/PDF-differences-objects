@@ -1,9 +1,26 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pymupdf as fitz
 from helpers import make_drawing_pdf, make_text_layer_over_image_pdf
 
 from pdf_differences.comparison import compare_pdfs
-from pdf_differences.models import ChangeCategory, ChangeType
+from pdf_differences.models import ChangeCategory, ChangeType, Transform
+
+
+def _make_single_shared_text_pdf(
+    path: Path,
+    shared_point: tuple[float, float],
+    unique_text: str,
+) -> Path:
+    document = fitz.open()
+    page = document.new_page(width=300, height=200)
+    page.insert_text(fitz.Point(*shared_point), ".010", fontsize=10)
+    page.insert_text(fitz.Point(20, 180), unique_text, fontsize=10)
+    document.save(path)
+    document.close()
+    return path
 
 
 def test_end_to_end_finds_dimension_edit_and_added_geometry(tmp_path):
@@ -39,6 +56,25 @@ def test_global_export_shift_is_removed_by_vector_alignment(tmp_path):
     result = compare_pdfs(old, new)
     assert result.pages[0].alignment.status == "aligned"
     assert result.changes == ()
+
+
+def test_single_accidental_anchor_keeps_page_frames_aligned(tmp_path):
+    old = _make_single_shared_text_pdf(tmp_path / "old.pdf", (150, 60), "OLD DRAWING")
+    new = _make_single_shared_text_pdf(tmp_path / "new.pdf", (30, 130), "NEW DRAWING")
+
+    result = compare_pdfs(old, new)
+
+    alignment = result.pages[0].alignment
+    assert alignment.status == "identity-unverified"
+    assert alignment.anchor_count == 1
+    assert alignment.transform == Transform()
+    assert "page frames were overlaid" in alignment.note
+    shared_text_changes = {
+        change.change_type
+        for change in result.changes
+        if change.before_text == ".010" or change.after_text == ".010"
+    }
+    assert shared_text_changes == {ChangeType.ADDED, ChangeType.REMOVED}
 
 
 def test_extra_page_entities_are_reported_as_added(tmp_path):

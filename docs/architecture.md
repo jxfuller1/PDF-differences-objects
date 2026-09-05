@@ -61,8 +61,8 @@ refined by a least-squares 2-D similarity fit.
 Statuses are explicit:
 
 - `aligned`: transform passed inlier and RMS thresholds;
-- `translation-only`: only one unique anchor existed;
-- `identity-unverified`: no unique anchor or a blank side;
+- `identity-unverified`: fewer than two trustworthy anchors existed, or one
+  side was blank; page frames are overlaid without registration;
 - `not-applicable`: a page exists in only one revision;
 - `failed`: populated sheets had anchors but no trustworthy registration; the
   comparison stops with an actionable error.

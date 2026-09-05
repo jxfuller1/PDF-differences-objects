@@ -167,18 +167,20 @@ def estimate_alignment(
         return AlignmentResult(
             status="identity-unverified",
             transform=identity,
-            note="No unique stable anchors were available; normalized page coordinates were used.",
+            note=(
+                "No unique stable anchors were available; the page frames were overlaid "
+                "without registration."
+            ),
         )
     if len(pairs) == 1:
-        old_point, new_point = pairs[0]
-        transform = Transform(tx=new_point[0] - old_point[0], ty=new_point[1] - old_point[1])
         return AlignmentResult(
-            status="translation-only",
-            transform=transform,
+            status="identity-unverified",
+            transform=identity,
             anchor_count=1,
-            inlier_count=1,
-            inlier_ratio=1.0,
-            note="One unique anchor was available; only translation could be estimated.",
+            note=(
+                "Only one unique anchor was available, so its translation could not be "
+                "verified; the page frames were overlaid without registration."
+            ),
         )
 
     best_transform: Transform | None = None
