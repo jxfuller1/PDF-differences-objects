@@ -3,17 +3,17 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 
 import numpy as np
 import pymupdf as fitz
 from PyQt6.QtCore import (
     QAbstractAnimation,
-    QEasingCurve,
     QPropertyAnimation,
     QRectF,
     Qt,
+    QTimer,
     pyqtProperty,
 )
 from PyQt6.QtGui import QBrush, QColor, QImage, QPainter, QPen, QPixmap, QTransform, QWheelEvent
@@ -24,12 +24,30 @@ from PyQt6.QtWidgets import (
     QGraphicsView,
 )
 
+import pdf_differences.ui.viewer_settings as viewer_settings
 from pdf_differences.models import Change, ChangeType, PageResult, Transform
 
-_OLD_COLOR = QColor(220, 35, 35)
-_NEW_COLOR = QColor(25, 90, 230)
-_OTHER_COLOR = QColor(170, 80, 180)
+_OLD_PAGE_TINT = QColor(*viewer_settings.OLD_PAGE_TINT_RGB)
+_NEW_PAGE_TINT = QColor(*viewer_settings.NEW_PAGE_TINT_RGB)
+_REMOVED_REGION_COLOR = QColor(*viewer_settings.REMOVED_REGION_RGB)
+_ADDED_REGION_COLOR = QColor(*viewer_settings.ADDED_REGION_RGB)
+_OTHER_REGION_COLOR = QColor(*viewer_settings.OTHER_REGION_RGB)
 _RENDER_SCALE = 1.6
+
+
+class ChangeRegionItem(QGraphicsRectItem):
+    def __init__(self, rect: QRectF, change_id: str, on_clicked: Callable[[str], None]) -> None:
+        super().__init__(rect)
+        self._change_id = change_id
+        self._on_clicked = on_clicked
+        self.setAcceptedMouseButtons(Qt.MouseButton.LeftButton)
+        self.setAcceptHoverEvents(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+
+    def mousePressEvent(self, event) -> None:
+        self._on_clicked(self._change_id)
+        event.accept()
 
 
 class OverlayPageViewer(QGraphicsView):
@@ -48,10 +66,14 @@ class OverlayPageViewer(QGraphicsView):
             "Display preview only. Comparison still uses native PDF vector and text entities."
         )
         self._page_bounds: QRectF | None = None
+        self._page_index: int | None = None
+        self._selected_id: str | None = None
         self._layers: dict[str, QGraphicsPixmapItem] = {}
         self._regions: dict[str, QGraphicsRectItem] = {}
         self._region_colors: dict[str, QColor] = {}
         self._region_types: dict[str, ChangeType] = {}
+        self._region_clicked: Callable[[str], None] | None = None
+        self._visible_change_ids: set[str] | None = None
         self._blend = 50
         self._show_added = True
         self._show_removed = True
@@ -59,19 +81,22 @@ class OverlayPageViewer(QGraphicsView):
         self._blink_regions = True
         self._pulse_strength = 0.0
         self._pulse_animation = QPropertyAnimation(self, b"pulseStrength", self)
-        self._pulse_animation.setDuration(1100)
-        self._pulse_animation.setStartValue(0.0)
-        self._pulse_animation.setKeyValueAt(0.5, 1.0)
-        self._pulse_animation.setEndValue(0.0)
-        self._pulse_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self._pulse_animation.setLoopCount(-1)
+        self._pulse_animation.setDuration(viewer_settings.BLINK_DURATION_MS)
+        self._pulse_animation.setStartValue(viewer_settings.BLINK_START_STRENGTH)
+        self._pulse_animation.setKeyValueAt(
+            viewer_settings.BLINK_PEAK_POSITION,
+            viewer_settings.BLINK_PEAK_STRENGTH,
+        )
+        self._pulse_animation.setEndValue(viewer_settings.BLINK_END_STRENGTH)
+        self._pulse_animation.setEasingCurve(viewer_settings.BLINK_EASING_CURVE)
+        self._pulse_animation.setLoopCount(viewer_settings.BLINK_LOOP_COUNT)
 
     @staticmethod
-    def _render_tinted_page(
+    def _render_page_layers(
         pdf_path: str,
         page_index: int,
-        color: QColor,
-    ) -> tuple[QPixmap, float, float] | None:
+        tint: QColor,
+    ) -> tuple[QPixmap, QPixmap] | None:
         source = Path(pdf_path)
         if not source.is_file():
             return None
@@ -81,28 +106,38 @@ class OverlayPageViewer(QGraphicsView):
             page = document.load_page(page_index)
             pixmap = page.get_pixmap(
                 matrix=fitz.Matrix(_RENDER_SCALE, _RENDER_SCALE),
-                colorspace=fitz.csGRAY,
+                colorspace=fitz.csRGB,
                 alpha=False,
             )
-            gray = np.ndarray(
-                (pixmap.height, pixmap.width),
+            rgb = np.ndarray(
+                (pixmap.height, pixmap.width, 3),
                 dtype=np.uint8,
                 buffer=pixmap.samples,
-                strides=(pixmap.stride, 1),
+                strides=(pixmap.stride, 3, 1),
+            )
+            original_image = QImage(
+                rgb.data,
+                pixmap.width,
+                pixmap.height,
+                pixmap.stride,
+                QImage.Format.Format_RGB888,
+            ).copy()
+            luminance = (0.299 * rgb[:, :, 0] + 0.587 * rgb[:, :, 1] + 0.114 * rgb[:, :, 2]).astype(
+                np.uint8
             )
             rgba = np.empty((pixmap.height, pixmap.width, 4), dtype=np.uint8)
-            rgba[:, :, 0] = color.red()
-            rgba[:, :, 1] = color.green()
-            rgba[:, :, 2] = color.blue()
-            rgba[:, :, 3] = 255 - gray
-            image = QImage(
+            rgba[:, :, 0] = tint.red()
+            rgba[:, :, 1] = tint.green()
+            rgba[:, :, 2] = tint.blue()
+            rgba[:, :, 3] = 255 - luminance
+            tint_image = QImage(
                 rgba.data,
                 pixmap.width,
                 pixmap.height,
                 rgba.strides[0],
                 QImage.Format.Format_RGBA8888,
             ).copy()
-            return QPixmap.fromImage(image), float(page.rect.width), float(page.rect.height)
+            return QPixmap.fromImage(original_image), QPixmap.fromImage(tint_image)
 
     @staticmethod
     def _old_to_new_transform(
@@ -141,14 +176,16 @@ class OverlayPageViewer(QGraphicsView):
         self.scene().clear()
         self.resetTransform()
         self._page_bounds = None
+        self._page_index = page.page_index
+        self._selected_id = None
         self._layers.clear()
         self._regions.clear()
         self._region_colors.clear()
         self._region_types.clear()
 
         try:
-            old_render = self._render_tinted_page(old_pdf_path, page.page_index, _OLD_COLOR)
-            new_render = self._render_tinted_page(new_pdf_path, page.page_index, _NEW_COLOR)
+            old_render = self._render_page_layers(old_pdf_path, page.page_index, _OLD_PAGE_TINT)
+            new_render = self._render_page_layers(new_pdf_path, page.page_index, _NEW_PAGE_TINT)
         except Exception as exc:
             self._message(f"Preview unavailable: {exc}")
             return
@@ -167,25 +204,32 @@ class OverlayPageViewer(QGraphicsView):
         )
         background.setZValue(-1)
 
+        old_transform = None
+        if old_render is not None and new_render is not None:
+            old_transform = self._old_to_new_transform(
+                page.alignment.transform,
+                old_render[0].width(),
+                old_render[0].height(),
+                width,
+                height,
+            )
         if old_render is not None:
-            old_pixmap = old_render[0]
-            old_item = self.scene().addPixmap(old_pixmap)
-            old_item.setZValue(0)
-            if new_render is not None:
-                old_item.setTransform(
-                    self._old_to_new_transform(
-                        page.alignment.transform,
-                        old_pixmap.width(),
-                        old_pixmap.height(),
-                        width,
-                        height,
-                    )
-                )
-            self._layers["old"] = old_item
+            for name, pixmap, z_value in (
+                ("old_original", old_render[0], 0),
+                ("old_tint", old_render[1], 1),
+            ):
+                item = self.scene().addPixmap(pixmap)
+                item.setZValue(z_value)
+                if old_transform is not None:
+                    item.setTransform(old_transform)
+                self._layers[name] = item
         if new_render is not None:
             new_item = self.scene().addPixmap(new_render[0])
-            new_item.setZValue(1)
-            self._layers["new"] = new_item
+            new_item.setZValue(2)
+            self._layers["new_original"] = new_item
+            new_tint_item = self.scene().addPixmap(new_render[1])
+            new_tint_item.setZValue(3)
+            self._layers["new_tint"] = new_tint_item
 
         selected_rect: QRectF | None = None
         for change in changes:
@@ -197,35 +241,36 @@ class OverlayPageViewer(QGraphicsView):
                 max(2.0, (y1 - y0) * height),
             )
             color = self._color_for_change(change.change_type)
-            region = self.scene().addRect(rectangle)
+            region = ChangeRegionItem(rectangle, change.id, self._handle_region_clicked)
             region.setData(0, change.id)
             region.setToolTip(
                 f"{change.change_type.value.title()} · {change.category.value}\n{change.detail}"
             )
             region.setZValue(10)
+            self.scene().addItem(region)
             self._regions[change.id] = region
             self._region_colors[change.id] = color
             self._region_types[change.id] = change.change_type
             if change.id == selected_id:
                 selected_rect = rectangle
 
-        self.scene().setSceneRect(self._page_bounds)
+        scene_margin = max(width, height) * 0.3
+        self.scene().setSceneRect(
+            self._page_bounds.adjusted(-scene_margin, -scene_margin, scene_margin, scene_margin)
+        )
         self._apply_state()
         if selected_rect is None:
             self.fit_to_page()
         else:
-            padding = max(35.0, max(selected_rect.width(), selected_rect.height()) * 1.5)
-            focus = selected_rect.adjusted(-padding, -padding, padding, padding)
-            self.fitInView(focus.intersected(self._page_bounds), Qt.AspectRatioMode.KeepAspectRatio)
-            self.centerOn(selected_rect.center())
+            self.focus_change(selected_id)
 
     @staticmethod
     def _color_for_change(change_type: ChangeType) -> QColor:
         if change_type == ChangeType.ADDED:
-            return _NEW_COLOR
+            return _ADDED_REGION_COLOR
         if change_type == ChangeType.REMOVED:
-            return _OLD_COLOR
-        return _OTHER_COLOR
+            return _REMOVED_REGION_COLOR
+        return _OTHER_REGION_COLOR
 
     def set_blend(self, value: int) -> None:
         self._blend = max(0, min(100, int(value)))
@@ -250,7 +295,15 @@ class OverlayPageViewer(QGraphicsView):
         self._blink_regions = bool(enabled)
         self._apply_state()
 
+    def set_visible_change_ids(self, change_ids: Iterable[str] | None) -> None:
+        """Restrict regions to IDs allowed by the active result-table filters."""
+
+        self._visible_change_ids = None if change_ids is None else set(change_ids)
+        self._apply_state()
+
     def _region_is_enabled(self, change_id: str) -> bool:
+        if self._visible_change_ids is not None and change_id not in self._visible_change_ids:
+            return False
         change_type = self._region_types[change_id]
         if change_type == ChangeType.ADDED:
             return self._show_added
@@ -260,11 +313,17 @@ class OverlayPageViewer(QGraphicsView):
 
     def _apply_state(self) -> None:
         t = self._blend / 100.0
-        smooth = t * t * (3.0 - 2.0 * t)
-        if "old" in self._layers:
-            self._layers["old"].setOpacity(min(1.0, 2.0 * (1.0 - smooth)))
-        if "new" in self._layers:
-            self._layers["new"].setOpacity(min(1.0, 2.0 * smooth))
+        edge = 1.0 - min(1.0, abs(2.0 * t - 1.0))
+        left = max(0.0, 1.0 - 2.0 * t)
+        right = max(0.0, 2.0 * t - 1.0)
+        if "old_original" in self._layers:
+            self._layers["old_original"].setOpacity(left)
+        if "old_tint" in self._layers:
+            self._layers["old_tint"].setOpacity(edge)
+        if "new_original" in self._layers:
+            self._layers["new_original"].setOpacity(right)
+        if "new_tint" in self._layers:
+            self._layers["new_tint"].setOpacity(edge)
         for change_id, region in self._regions.items():
             region.setVisible(self._show_regions and self._region_is_enabled(change_id))
         self._refresh_pulse_animation()
@@ -275,15 +334,46 @@ class OverlayPageViewer(QGraphicsView):
 
     def _set_pulse_strength(self, strength: float) -> None:
         self._pulse_strength = max(0.0, min(1.0, float(strength)))
-        alpha = round(110 + 145 * self._pulse_strength)
-        fill_alpha = round(16 + 54 * self._pulse_strength)
-        width = 1.5 + 2.0 * self._pulse_strength
+        alpha = round(
+            viewer_settings.REGION_BORDER_ALPHA_MIN
+            + (viewer_settings.REGION_BORDER_ALPHA_MAX - viewer_settings.REGION_BORDER_ALPHA_MIN)
+            * self._pulse_strength
+        )
+        fill_alpha = round(
+            viewer_settings.REGION_FILL_ALPHA_MIN
+            + (viewer_settings.REGION_FILL_ALPHA_MAX - viewer_settings.REGION_FILL_ALPHA_MIN)
+            * self._pulse_strength
+        )
+        width = (
+            viewer_settings.REGION_BORDER_WIDTH_MIN
+            + (viewer_settings.REGION_BORDER_WIDTH_MAX - viewer_settings.REGION_BORDER_WIDTH_MIN)
+            * self._pulse_strength
+        )
         for change_id, region in self._regions.items():
             color = self._region_colors[change_id]
-            pen = QPen(QColor(color.red(), color.green(), color.blue(), alpha), width)
+            selected = change_id == self._selected_id
+            pen_alpha = viewer_settings.SELECTED_REGION_BORDER_ALPHA if selected else alpha
+            pen_width = (
+                width + viewer_settings.SELECTED_REGION_BORDER_WIDTH_BONUS if selected else width
+            )
+            pen = QPen(
+                QColor(color.red(), color.green(), color.blue(), pen_alpha),
+                pen_width,
+            )
             pen.setCosmetic(True)
             region.setPen(pen)
-            region.setBrush(QBrush(QColor(color.red(), color.green(), color.blue(), fill_alpha)))
+            region.setBrush(
+                QBrush(
+                    QColor(
+                        color.red(),
+                        color.green(),
+                        color.blue(),
+                        max(fill_alpha, viewer_settings.SELECTED_REGION_FILL_ALPHA_MIN)
+                        if selected
+                        else fill_alpha,
+                    )
+                )
+            )
 
     pulseStrength = pyqtProperty(float, _get_pulse_strength, _set_pulse_strength)
 
@@ -301,6 +391,47 @@ class OverlayPageViewer(QGraphicsView):
         if self._page_bounds is not None:
             self.fitInView(self._page_bounds, Qt.AspectRatioMode.KeepAspectRatio)
 
+    @property
+    def page_index(self) -> int | None:
+        return self._page_index
+
+    def focus_change(self, change_id: str | None, *, zoom: bool = True) -> bool:
+        if change_id is None or change_id not in self._regions:
+            return False
+        self._selected_id = change_id
+        self.scene().clearSelection()
+        region = self._regions[change_id]
+        region.setSelected(True)
+        self._set_pulse_strength(self._pulse_strength)
+        if zoom:
+            rectangle = region.sceneBoundingRect()
+            center = rectangle.center()
+            focus_width = max(rectangle.width() * 1.25, self._page_bounds.width() * 0.08)
+            focus_height = max(rectangle.height() * 1.25, self._page_bounds.height() * 0.08)
+            focus = QRectF(
+                center.x() - focus_width / 2.0,
+                center.y() - focus_height / 2.0,
+                focus_width,
+                focus_height,
+            )
+            self.fitInView(focus, Qt.AspectRatioMode.KeepAspectRatio)
+            self.centerOn(center)
+            QTimer.singleShot(0, lambda ident=change_id: self._recenter_change(ident))
+        return True
+
+    def _recenter_change(self, change_id: str) -> None:
+        if change_id == self._selected_id and change_id in self._regions:
+            center = self._regions[change_id].sceneBoundingRect().center()
+            visible = self.mapToScene(self.viewport().rect()).boundingRect()
+            required = QRectF(
+                center.x() - visible.width() / 2.0,
+                center.y() - visible.height() / 2.0,
+                visible.width(),
+                visible.height(),
+            )
+            self.scene().setSceneRect(self.sceneRect().united(required))
+            self.centerOn(center)
+
     def reset_view(self) -> None:
         self.resetTransform()
         if self._page_bounds is not None:
@@ -317,6 +448,14 @@ class OverlayPageViewer(QGraphicsView):
     def mouseDoubleClickEvent(self, event) -> None:
         self.fit_to_page()
         super().mouseDoubleClickEvent(event)
+
+    def set_region_clicked_handler(self, handler: Callable[[str], None]) -> None:
+        self._region_clicked = handler
+
+    def _handle_region_clicked(self, change_id: str) -> None:
+        self.focus_change(change_id)
+        if self._region_clicked is not None:
+            self._region_clicked(change_id)
 
 
 # Kept as a compatibility alias for callers that imported the old viewer class.
