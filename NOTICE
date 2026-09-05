@@ -1,0 +1,16 @@
+PDF Differences Objects
+Copyright 2026 PDF Differences Objects contributors
+
+This product is a substantially modified derivative of CaD-Track:
+https://github.com/joedanields/CaD-Track
+
+CaD-Track was distributed under the Apache License, Version 2.0. Its license is
+retained and its upstream provenance is recorded in this repository. The
+derivative removes the browser/API, raster-image, OCR, and Tesseract paths and
+replaces them with a vector-only desktop application, deterministic alignment
+and matching, and mechanical-drawing inspection-relevance rules.
+
+The three-stage matching design was also informed at a conceptual level by
+CADMorph: https://github.com/Mirdula18/CADMorph. CADMorph did not contain a
+license when reviewed on 2026-09-04; no CADMorph source code or model assets
+are included here.
