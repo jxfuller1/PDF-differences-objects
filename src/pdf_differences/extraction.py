@@ -16,6 +16,8 @@ import pymupdf as fitz
 from pdf_differences.models import BBox, Entity, EntityKind, Point
 
 _ROUND = 6
+_WHITE_THRESHOLD = 0.995
+_VISIBLE_OPACITY = 0.001
 
 
 def normalize_text(text: str) -> str:
@@ -55,6 +57,39 @@ def _color(value: Any) -> str:
         return str(value)
 
 
+def _opacity(value: Any) -> float:
+    return 1.0 if value is None else float(value)
+
+
+def _is_white(value: Any) -> bool:
+    if value is None:
+        return False
+    if isinstance(value, int):
+        return value & 0xFFFFFF == 0xFFFFFF
+    try:
+        return all(float(channel) >= _WHITE_THRESHOLD for channel in value)
+    except TypeError:
+        return False
+
+
+def _has_visible_paint(drawing: dict[str, Any]) -> bool:
+    """Exclude transparent or white-on-white paths that do not mark a CAD sheet."""
+
+    stroke = drawing.get("color")
+    fill = drawing.get("fill")
+    visible_stroke = (
+        stroke is not None
+        and _opacity(drawing.get("stroke_opacity")) > _VISIBLE_OPACITY
+        and not _is_white(stroke)
+    )
+    visible_fill = (
+        fill is not None
+        and _opacity(drawing.get("fill_opacity")) > _VISIBLE_OPACITY
+        and not _is_white(fill)
+    )
+    return visible_stroke or visible_fill
+
+
 def _points_for_item(item: tuple, width: float, height: float) -> tuple[Point, ...]:
     operation = item[0]
     if operation == "l":
@@ -90,6 +125,8 @@ def _polyline_length(points: tuple[Point, ...], close: bool = False) -> float:
 def _geometry_entity(
     page_index: int, source_index: int, drawing: dict[str, Any], page: fitz.Page
 ) -> Entity | None:
+    if not _has_visible_paint(drawing):
+        return None
     width = max(float(page.rect.width), 1.0)
     height = max(float(page.rect.height), 1.0)
     operations: list[str] = []
@@ -131,8 +168,8 @@ def _geometry_entity(
         _color(drawing.get("fill")),
         round(float(drawing.get("width") or 0.0) / max(width, height), _ROUND),
         str(drawing.get("dashes") or ""),
-        round(float(drawing.get("stroke_opacity") or 1.0), 4),
-        round(float(drawing.get("fill_opacity") or 1.0), 4),
+        round(_opacity(drawing.get("stroke_opacity")), 4),
+        round(_opacity(drawing.get("fill_opacity")), 4),
         bool(drawing.get("closePath")),
     )
     shape_signature = _digest(*relative_items)

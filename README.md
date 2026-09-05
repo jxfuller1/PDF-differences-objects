@@ -68,10 +68,12 @@ In the app:
 
 1. Select or drop the baseline and revised PDFs.
 2. Choose **Compare PDFs**.
-3. Review the aligned revisions in one overlay: old content is red and new
-   content is blue. Drag the slider or use **Old**, **Differences**, and **New**.
-4. Toggle addition/removal boxes or their blinking, then select a table row to
-   focus its region.
+3. Review the aligned revisions in one overlay. The slider endpoints show each
+   PDF in its original colors; between them, old content is red and new content
+   is blue. Use **Old**, **Differences**, and **New** to jump to key positions.
+4. Use the **Additions**, **Removals**, **Regions**, and **Blink** checkboxes to
+   control the overlays. Selecting a table row zooms and centers its region;
+   clicking a region selects and reveals its corresponding table row.
 5. Filter by change type, parser category, free text, or inspection relevance.
 6. Export structured JSON, CSV, or an annotated copy of the revised PDF.
 
@@ -141,6 +143,8 @@ an end-to-end vector drawing pair.
   was unavailable. Raster-only pages are rejected.
 - Entity granularity depends on how the originating CAD software grouped paths
   in its PDF display list.
+- Fully transparent and all-white drawing paths are treated as non-visible CAD
+  export masks, so they do not create false added-geometry rows.
 - Custom symbol fonts may expose replacement/private-use characters. Known GD&T
   words and common Unicode symbols are supported, but a human should review any
   unclassified text.

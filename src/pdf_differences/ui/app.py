@@ -20,6 +20,7 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QMessageBox,
+    QPlainTextEdit,
     QProgressBar,
     QPushButton,
     QSlider,
@@ -123,8 +124,10 @@ class PdfDifferencesWindow(QMainWindow):
         self.summary = QLabel("No comparison loaded.")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
-        self.notes = QLabel("")
-        self.notes.setWordWrap(True)
+        self.notes = QPlainTextEdit()
+        self.notes.setReadOnly(True)
+        self.notes.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        self.notes.setMaximumHeight(120)
         layout.addWidget(self.notes)
 
         metrics = QHBoxLayout()
@@ -141,6 +144,7 @@ class PdfDifferencesWindow(QMainWindow):
         viewer_layout = QVBoxLayout(viewer_panel)
         viewer_layout.setContentsMargins(0, 0, 0, 0)
         self.viewer = OverlayPageViewer()
+        self.viewer.set_region_clicked_handler(self._select_change_by_id)
         # Compatibility names for code that referenced either former preview pane.
         self.old_view = self.viewer
         self.new_view = self.viewer
@@ -168,30 +172,29 @@ class PdfDifferencesWindow(QMainWindow):
         self.blend_slider = QSlider(Qt.Orientation.Horizontal)
         self.blend_slider.setRange(0, 100)
         self.blend_slider.setValue(50)
-        self.blend_slider.setToolTip("Morph the overlaid view from the old revision to the new.")
+        self.blend_slider.setToolTip(
+            "Old and New endpoints use the PDFs' original colors; the middle shows "
+            "the old revision in red and the new revision in blue."
+        )
         self.blend_slider.valueChanged.connect(self._set_blend)
         control_row.addWidget(self.blend_slider, 1)
 
-        self.added_toggle = QPushButton("Additions")
-        self.added_toggle.setCheckable(True)
+        self.added_toggle = QCheckBox("Additions")
         self.added_toggle.setChecked(True)
         self.added_toggle.setToolTip("Show or hide added change regions.")
         self.added_toggle.toggled.connect(self.viewer.show_additions)
         control_row.addWidget(self.added_toggle)
-        self.removed_toggle = QPushButton("Removals")
-        self.removed_toggle.setCheckable(True)
+        self.removed_toggle = QCheckBox("Removals")
         self.removed_toggle.setChecked(True)
         self.removed_toggle.setToolTip("Show or hide removed change regions.")
         self.removed_toggle.toggled.connect(self.viewer.show_removals)
         control_row.addWidget(self.removed_toggle)
-        self.regions_toggle = QPushButton("Regions")
-        self.regions_toggle.setCheckable(True)
+        self.regions_toggle = QCheckBox("Regions")
         self.regions_toggle.setChecked(True)
         self.regions_toggle.setToolTip("Show or hide all change-region boxes.")
         self.regions_toggle.toggled.connect(self.viewer.show_regions)
         control_row.addWidget(self.regions_toggle)
-        self.blink_toggle = QPushButton("Blink")
-        self.blink_toggle.setCheckable(True)
+        self.blink_toggle = QCheckBox("Blink")
         self.blink_toggle.setChecked(True)
         self.blink_toggle.setToolTip("Turn the change-region pulse animation on or off.")
         self.blink_toggle.toggled.connect(self.viewer.blink_regions)
@@ -206,7 +209,13 @@ class PdfDifferencesWindow(QMainWindow):
         return control_row
 
     def _set_blend(self, value: int) -> None:
-        self.blend_label.setText(f"Old (red) ← {value}% → New (blue)")
+        if value == 0:
+            label = "Old (original) ← 0% → New"
+        elif value == 100:
+            label = "Old ← 100% → New (original)"
+        else:
+            label = f"Old (red) ← {value}% → New (blue)"
+        self.blend_label.setText(label)
         self.viewer.set_blend(value)
 
     def _file_row(self, form: QFormLayout, label: str, placeholder: str) -> PdfPathEdit:
@@ -366,7 +375,7 @@ class PdfDifferencesWindow(QMainWindow):
             + (f" — {'; '.join(page.notes)}" if page.notes else "")
             for page in result.pages
         ]
-        self.notes.setText("\n".join((*result.notes, *page_notes)) or "No comparison notes.")
+        self.notes.setPlainText("\n".join((*result.notes, *page_notes)) or "No comparison notes.")
         values = {
             "total": len(result.changes),
             "relevant": len(result.relevant_changes),
@@ -457,7 +466,42 @@ class PdfDifferencesWindow(QMainWindow):
         change_id = first_item.data(Qt.ItemDataRole.UserRole)
         selected = next((change for change in self.result.changes if change.id == change_id), None)
         if selected is not None:
-            self._show_page(selected.page_index, selected.id)
+            if self.viewer.page_index == selected.page_index:
+                self.viewer.focus_change(selected.id)
+            else:
+                self._show_page(selected.page_index, selected.id)
+
+    def _select_change_by_id(self, change_id: str) -> None:
+        if self.result is None:
+            return
+        row = self._row_for_change(change_id)
+        if row is None:
+            with (
+                QSignalBlocker(self.search_filter),
+                QSignalBlocker(self.type_filter),
+                QSignalBlocker(self.category_filter),
+                QSignalBlocker(self.relevant_only_filter),
+            ):
+                self.search_filter.clear()
+                self.type_filter.setCurrentIndex(0)
+                self.category_filter.setCurrentIndex(0)
+                self.relevant_only_filter.setChecked(False)
+            self._populate_table()
+            row = self._row_for_change(change_id)
+        if row is None:
+            return
+        item = self.table.item(row, 0)
+        with QSignalBlocker(self.table):
+            self.table.selectRow(row)
+        self.table.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtCenter)
+        self.viewer.focus_change(change_id)
+
+    def _row_for_change(self, change_id: str) -> int | None:
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, 0)
+            if item is not None and item.data(Qt.ItemDataRole.UserRole) == change_id:
+                return row
+        return None
 
     def _page_changed(self, index: int) -> None:
         if index >= 0:
