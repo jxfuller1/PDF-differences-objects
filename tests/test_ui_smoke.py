@@ -10,6 +10,7 @@ from PyQt6.QtCore import QAbstractAnimation, Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit  # noqa: E402
 
+import pdf_differences.ui.viewer_settings as viewer_settings  # noqa: E402
 from pdf_differences.comparison import compare_pdfs  # noqa: E402
 from pdf_differences.models import ChangeType  # noqa: E402
 from pdf_differences.ui.app import PdfDifferencesWindow  # noqa: E402
@@ -93,6 +94,10 @@ def test_overlay_blends_and_blinks_toggleable_added_and_removed_regions():
     viewer.load_page(old_path, new_path, page, page.changes)
     application.processEvents()
 
+    assert viewer._pulse_animation.duration() == viewer_settings.BLINK_DURATION_MS
+    assert viewer._region_colors[added.id].getRgb()[:3] == viewer_settings.ADDED_REGION_RGB
+    assert viewer._region_colors[removed.id].getRgb()[:3] == viewer_settings.REMOVED_REGION_RGB
+
     viewer.set_blend(0)
     assert viewer._layers["old_original"].opacity() == 1.0
     assert viewer._layers["new_original"].opacity() == 0.0
@@ -119,6 +124,66 @@ def test_overlay_blends_and_blinks_toggleable_added_and_removed_regions():
     viewer.blink_regions(False)
     assert viewer._pulse_animation.state() == QAbstractAnimation.State.Stopped
     viewer.deleteLater()
+
+
+def test_table_filters_also_control_visible_regions():
+    application = QApplication.instance() or QApplication([])
+    old_path, new_path = _sample_paths()
+    result = compare_pdfs(old_path, new_path)
+    window = PdfDifferencesWindow()
+    window._old_path = old_path
+    window._new_path = new_path
+    window._comparison_finished(result)
+    application.processEvents()
+
+    def table_ids() -> set[str]:
+        return {
+            window.table.item(row, 0).data(Qt.ItemDataRole.UserRole)
+            for row in range(window.table.rowCount())
+        }
+
+    def visible_region_ids() -> set[str]:
+        return {
+            change_id for change_id, region in window.viewer._regions.items() if region.isVisible()
+        }
+
+    def assert_view_matches_table() -> None:
+        assert visible_region_ids() == table_ids().intersection(window.viewer._regions)
+
+    assert_view_matches_table()
+
+    added_index = window.type_filter.findData(ChangeType.ADDED.value)
+    window.type_filter.setCurrentIndex(added_index)
+    assert window.table.rowCount() > 0
+    assert_view_matches_table()
+
+    window.added_toggle.setChecked(False)
+    assert not visible_region_ids()
+    window.added_toggle.setChecked(True)
+    assert_view_matches_table()
+
+    window.type_filter.setCurrentIndex(0)
+    category = result.pages[0].changes[0].category.value
+    category_index = window.category_filter.findData(category)
+    window.category_filter.setCurrentIndex(category_index)
+    assert_view_matches_table()
+
+    window.category_filter.setCurrentIndex(0)
+    window.search_filter.setText(result.pages[0].changes[0].label)
+    assert_view_matches_table()
+
+    window.search_filter.clear()
+    window.relevant_only_filter.setChecked(True)
+    assert_view_matches_table()
+
+    window._show_page(result.pages[0].page_index)
+    assert_view_matches_table()
+
+    window.regions_toggle.setChecked(False)
+    assert not visible_region_ids()
+    window.regions_toggle.setChecked(True)
+    assert_view_matches_table()
+    window.deleteLater()
 
 
 def test_table_and_view_regions_select_each_other_and_center_the_change():
@@ -148,6 +213,12 @@ def test_table_and_view_regions_select_each_other_and_center_the_change():
     modified_index = window.type_filter.findData(ChangeType.MODIFIED.value)
     window.type_filter.setCurrentIndex(modified_index)
     assert window._row_for_change(added.id) is None
+    assert not window.viewer._regions[added.id].isVisible()
+
+    added_index = window.type_filter.findData(ChangeType.ADDED.value)
+    window.type_filter.setCurrentIndex(added_index)
+    assert window._row_for_change(added.id) is not None
+    assert window.viewer._regions[added.id].isVisible()
     window.viewer.fit_to_page()
     application.processEvents()
     added_center = window.viewer._regions[added.id].sceneBoundingRect().center()
@@ -160,7 +231,7 @@ def test_table_and_view_regions_select_each_other_and_center_the_change():
 
     selected_item = window.table.item(window.table.currentRow(), 0)
     assert selected_item.data(Qt.ItemDataRole.UserRole) == added.id
-    assert window.type_filter.currentIndex() == 0
+    assert window.type_filter.currentIndex() == added_index
     assert window.viewer._selected_id == added.id
     window.close()
     application.processEvents()

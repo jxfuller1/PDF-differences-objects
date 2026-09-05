@@ -75,7 +75,15 @@ In the app:
    control the overlays. Selecting a table row zooms and centers its region;
    clicking a region selects and reveals its corresponding table row.
 5. Filter by change type, parser category, free text, or inspection relevance.
+   The table and visible change regions always use the same active filters.
 6. Export structured JSON, CSV, or an annotated copy of the revised PDF.
+
+## Viewer appearance and blink settings
+
+Edit `src/pdf_differences/ui/viewer_settings.py` to change the old/new page
+tints, addition/removal/other region colors, blink duration and curve, border
+and fill opacity, border width, or selected-region emphasis. Region colors are
+separate from page tint colors, so either can be adjusted independently.
 
 The sample pair in `samples/mechanical_pair` is completely vector-native:
 

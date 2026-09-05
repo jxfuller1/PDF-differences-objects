@@ -406,12 +406,12 @@ class PdfDifferencesWindow(QMainWindow):
         if self._close_when_finished:
             self.close()
 
-    def _populate_table(self, *_args) -> None:
+    def _filtered_changes(self) -> list[Change]:
         query = self.search_filter.text().casefold()
         selected_type = self.type_filter.currentData()
         selected_category = self.category_filter.currentData()
         relevant_only = self.relevant_only_filter.isChecked()
-        self.table.setRowCount(0)
+        filtered: list[Change] = []
         for change in self._changes:
             tier = change.match_tier.value if change.match_tier else "unmatched"
             searchable = " ".join(
@@ -435,7 +435,14 @@ class PdfDifferencesWindow(QMainWindow):
                 continue
             if relevant_only and not change.inspection_relevant:
                 continue
+            filtered.append(change)
+        return filtered
 
+    def _populate_table(self, *_args) -> None:
+        filtered_changes = self._filtered_changes()
+        self.table.setRowCount(0)
+        for change in filtered_changes:
+            tier = change.match_tier.value if change.match_tier else "unmatched"
             row = self.table.rowCount()
             self.table.insertRow(row)
             score = (
@@ -456,6 +463,7 @@ class PdfDifferencesWindow(QMainWindow):
                 item = QTableWidgetItem(value)
                 self.table.setItem(row, column, item)
             self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, change.id)
+        self.viewer.set_visible_change_ids(change.id for change in filtered_changes)
 
     def _select_change(self) -> None:
         if self.result is None or self.table.currentRow() < 0:

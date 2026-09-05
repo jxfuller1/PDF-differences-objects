@@ -10,7 +10,6 @@ import numpy as np
 import pymupdf as fitz
 from PyQt6.QtCore import (
     QAbstractAnimation,
-    QEasingCurve,
     QPropertyAnimation,
     QRectF,
     Qt,
@@ -25,11 +24,14 @@ from PyQt6.QtWidgets import (
     QGraphicsView,
 )
 
+import pdf_differences.ui.viewer_settings as viewer_settings
 from pdf_differences.models import Change, ChangeType, PageResult, Transform
 
-_OLD_COLOR = QColor(220, 35, 35)
-_NEW_COLOR = QColor(25, 90, 230)
-_OTHER_COLOR = QColor(170, 80, 180)
+_OLD_PAGE_TINT = QColor(*viewer_settings.OLD_PAGE_TINT_RGB)
+_NEW_PAGE_TINT = QColor(*viewer_settings.NEW_PAGE_TINT_RGB)
+_REMOVED_REGION_COLOR = QColor(*viewer_settings.REMOVED_REGION_RGB)
+_ADDED_REGION_COLOR = QColor(*viewer_settings.ADDED_REGION_RGB)
+_OTHER_REGION_COLOR = QColor(*viewer_settings.OTHER_REGION_RGB)
 _RENDER_SCALE = 1.6
 
 
@@ -71,6 +73,7 @@ class OverlayPageViewer(QGraphicsView):
         self._region_colors: dict[str, QColor] = {}
         self._region_types: dict[str, ChangeType] = {}
         self._region_clicked: Callable[[str], None] | None = None
+        self._visible_change_ids: set[str] | None = None
         self._blend = 50
         self._show_added = True
         self._show_removed = True
@@ -78,12 +81,15 @@ class OverlayPageViewer(QGraphicsView):
         self._blink_regions = True
         self._pulse_strength = 0.0
         self._pulse_animation = QPropertyAnimation(self, b"pulseStrength", self)
-        self._pulse_animation.setDuration(1100)
-        self._pulse_animation.setStartValue(0.0)
-        self._pulse_animation.setKeyValueAt(0.5, 1.0)
-        self._pulse_animation.setEndValue(0.0)
-        self._pulse_animation.setEasingCurve(QEasingCurve.Type.InOutSine)
-        self._pulse_animation.setLoopCount(-1)
+        self._pulse_animation.setDuration(viewer_settings.BLINK_DURATION_MS)
+        self._pulse_animation.setStartValue(viewer_settings.BLINK_START_STRENGTH)
+        self._pulse_animation.setKeyValueAt(
+            viewer_settings.BLINK_PEAK_POSITION,
+            viewer_settings.BLINK_PEAK_STRENGTH,
+        )
+        self._pulse_animation.setEndValue(viewer_settings.BLINK_END_STRENGTH)
+        self._pulse_animation.setEasingCurve(viewer_settings.BLINK_EASING_CURVE)
+        self._pulse_animation.setLoopCount(viewer_settings.BLINK_LOOP_COUNT)
 
     @staticmethod
     def _render_page_layers(
@@ -178,8 +184,8 @@ class OverlayPageViewer(QGraphicsView):
         self._region_types.clear()
 
         try:
-            old_render = self._render_page_layers(old_pdf_path, page.page_index, _OLD_COLOR)
-            new_render = self._render_page_layers(new_pdf_path, page.page_index, _NEW_COLOR)
+            old_render = self._render_page_layers(old_pdf_path, page.page_index, _OLD_PAGE_TINT)
+            new_render = self._render_page_layers(new_pdf_path, page.page_index, _NEW_PAGE_TINT)
         except Exception as exc:
             self._message(f"Preview unavailable: {exc}")
             return
@@ -261,10 +267,10 @@ class OverlayPageViewer(QGraphicsView):
     @staticmethod
     def _color_for_change(change_type: ChangeType) -> QColor:
         if change_type == ChangeType.ADDED:
-            return _NEW_COLOR
+            return _ADDED_REGION_COLOR
         if change_type == ChangeType.REMOVED:
-            return _OLD_COLOR
-        return _OTHER_COLOR
+            return _REMOVED_REGION_COLOR
+        return _OTHER_REGION_COLOR
 
     def set_blend(self, value: int) -> None:
         self._blend = max(0, min(100, int(value)))
@@ -289,7 +295,15 @@ class OverlayPageViewer(QGraphicsView):
         self._blink_regions = bool(enabled)
         self._apply_state()
 
+    def set_visible_change_ids(self, change_ids: Iterable[str] | None) -> None:
+        """Restrict regions to IDs allowed by the active result-table filters."""
+
+        self._visible_change_ids = None if change_ids is None else set(change_ids)
+        self._apply_state()
+
     def _region_is_enabled(self, change_id: str) -> bool:
+        if self._visible_change_ids is not None and change_id not in self._visible_change_ids:
+            return False
         change_type = self._region_types[change_id]
         if change_type == ChangeType.ADDED:
             return self._show_added
@@ -320,14 +334,28 @@ class OverlayPageViewer(QGraphicsView):
 
     def _set_pulse_strength(self, strength: float) -> None:
         self._pulse_strength = max(0.0, min(1.0, float(strength)))
-        alpha = round(110 + 145 * self._pulse_strength)
-        fill_alpha = round(16 + 54 * self._pulse_strength)
-        width = 1.5 + 2.0 * self._pulse_strength
+        alpha = round(
+            viewer_settings.REGION_BORDER_ALPHA_MIN
+            + (viewer_settings.REGION_BORDER_ALPHA_MAX - viewer_settings.REGION_BORDER_ALPHA_MIN)
+            * self._pulse_strength
+        )
+        fill_alpha = round(
+            viewer_settings.REGION_FILL_ALPHA_MIN
+            + (viewer_settings.REGION_FILL_ALPHA_MAX - viewer_settings.REGION_FILL_ALPHA_MIN)
+            * self._pulse_strength
+        )
+        width = (
+            viewer_settings.REGION_BORDER_WIDTH_MIN
+            + (viewer_settings.REGION_BORDER_WIDTH_MAX - viewer_settings.REGION_BORDER_WIDTH_MIN)
+            * self._pulse_strength
+        )
         for change_id, region in self._regions.items():
             color = self._region_colors[change_id]
             selected = change_id == self._selected_id
-            pen_alpha = 255 if selected else alpha
-            pen_width = width + 1.5 if selected else width
+            pen_alpha = viewer_settings.SELECTED_REGION_BORDER_ALPHA if selected else alpha
+            pen_width = (
+                width + viewer_settings.SELECTED_REGION_BORDER_WIDTH_BONUS if selected else width
+            )
             pen = QPen(
                 QColor(color.red(), color.green(), color.blue(), pen_alpha),
                 pen_width,
@@ -340,7 +368,9 @@ class OverlayPageViewer(QGraphicsView):
                         color.red(),
                         color.green(),
                         color.blue(),
-                        max(fill_alpha, 72) if selected else fill_alpha,
+                        max(fill_alpha, viewer_settings.SELECTED_REGION_FILL_ALPHA_MIN)
+                        if selected
+                        else fill_alpha,
                     )
                 )
             )
