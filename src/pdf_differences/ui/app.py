@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import QSignalBlocker, Qt, QThread
-from PyQt6.QtGui import QCloseEvent, QColor
+from PyQt6.QtGui import QCloseEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (
     QMessageBox,
     QProgressBar,
     QPushButton,
+    QSlider,
     QSplitter,
     QTableWidget,
     QTableWidgetItem,
@@ -31,15 +32,8 @@ from PyQt6.QtWidgets import (
 
 from pdf_differences.models import Change, ChangeCategory, ChangeType, ComparisonResult
 from pdf_differences.reporting import export_annotated_pdf, export_csv, export_json
-from pdf_differences.ui.viewer import PageViewer
+from pdf_differences.ui.viewer import OverlayPageViewer
 from pdf_differences.ui.worker import ComparisonWorker
-
-_ROW_COLORS = {
-    ChangeType.ADDED: QColor("#147a3b"),
-    ChangeType.REMOVED: QColor("#b52f2f"),
-    ChangeType.MOVED: QColor("#a85f00"),
-    ChangeType.MODIFIED: QColor("#1c5aa6"),
-}
 
 
 class PdfPathEdit(QLineEdit):
@@ -86,14 +80,13 @@ class PdfDifferencesWindow(QMainWindow):
         layout.setContentsMargins(18, 14, 18, 16)
         layout.setSpacing(9)
 
-        heading = QLabel("PDF Differences Objects")
-        heading.setObjectName("title")
-        layout.addWidget(heading)
-        subtitle = QLabel(
-            "Entity-level CAD revision review · vector paths + text layer · no OCR or pixel diff"
+        layout.addWidget(QLabel("PDF Differences Objects"))
+        layout.addWidget(
+            QLabel(
+                "Entity-level CAD revision review · vector paths + text layer · "
+                "no OCR or pixel diff"
+            )
         )
-        subtitle.setObjectName("subtitle")
-        layout.addWidget(subtitle)
 
         form = QFormLayout()
         self.old_path_edit = self._file_row(
@@ -106,7 +99,6 @@ class PdfDifferencesWindow(QMainWindow):
 
         action_row = QHBoxLayout()
         self.compare_button = QPushButton("Compare PDFs")
-        self.compare_button.setObjectName("primary")
         self.compare_button.clicked.connect(self.start_compare)
         action_row.addWidget(self.compare_button)
         self.cancel_button = QPushButton("Cancel")
@@ -129,36 +121,93 @@ class PdfDifferencesWindow(QMainWindow):
         layout.addLayout(action_row)
 
         self.summary = QLabel("No comparison loaded.")
-        self.summary.setObjectName("summary")
         self.summary.setWordWrap(True)
         layout.addWidget(self.summary)
         self.notes = QLabel("")
-        self.notes.setObjectName("notes")
         self.notes.setWordWrap(True)
         layout.addWidget(self.notes)
 
-        cards = QHBoxLayout()
+        metrics = QHBoxLayout()
         self.cards: dict[str, QLabel] = {}
         for key in ("total", "added", "removed", "moved", "modified", "relevant", "area"):
-            card = QLabel(f"0\n{key.title()}")
-            card.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            card.setMinimumWidth(105)
-            card.setObjectName("card")
-            cards.addWidget(card)
+            card = QLabel(f"{key.title()}: 0")
+            metrics.addWidget(card)
             self.cards[key] = card
-        layout.addLayout(cards)
+        metrics.addStretch()
+        layout.addLayout(metrics)
 
         vertical_splitter = QSplitter(Qt.Orientation.Vertical)
-        preview_splitter = QSplitter(Qt.Orientation.Horizontal)
-        self.old_view = PageViewer()
-        self.new_view = PageViewer()
-        preview_splitter.addWidget(self._viewer_panel("Baseline", self.old_view))
-        preview_splitter.addWidget(self._viewer_panel("Revision", self.new_view))
-        preview_splitter.setSizes([1, 1])
-        vertical_splitter.addWidget(preview_splitter)
+        viewer_panel = QWidget()
+        viewer_layout = QVBoxLayout(viewer_panel)
+        viewer_layout.setContentsMargins(0, 0, 0, 0)
+        self.viewer = OverlayPageViewer()
+        # Compatibility names for code that referenced either former preview pane.
+        self.old_view = self.viewer
+        self.new_view = self.viewer
+        viewer_layout.addLayout(self._review_controls())
+        viewer_layout.addWidget(self.viewer, 1)
+        vertical_splitter.addWidget(viewer_panel)
         vertical_splitter.addWidget(self._results_panel())
         vertical_splitter.setSizes([520, 330])
         layout.addWidget(vertical_splitter, 1)
+
+    def _review_controls(self) -> QHBoxLayout:
+        control_row = QHBoxLayout()
+        old_button = QPushButton("Old")
+        old_button.clicked.connect(lambda: self.blend_slider.setValue(0))
+        differences_button = QPushButton("Differences")
+        differences_button.clicked.connect(lambda: self.blend_slider.setValue(50))
+        new_button = QPushButton("New")
+        new_button.clicked.connect(lambda: self.blend_slider.setValue(100))
+        control_row.addWidget(old_button)
+        control_row.addWidget(differences_button)
+        control_row.addWidget(new_button)
+
+        self.blend_label = QLabel("Old (red) ← 50% → New (blue)")
+        control_row.addWidget(self.blend_label)
+        self.blend_slider = QSlider(Qt.Orientation.Horizontal)
+        self.blend_slider.setRange(0, 100)
+        self.blend_slider.setValue(50)
+        self.blend_slider.setToolTip("Morph the overlaid view from the old revision to the new.")
+        self.blend_slider.valueChanged.connect(self._set_blend)
+        control_row.addWidget(self.blend_slider, 1)
+
+        self.added_toggle = QPushButton("Additions")
+        self.added_toggle.setCheckable(True)
+        self.added_toggle.setChecked(True)
+        self.added_toggle.setToolTip("Show or hide added change regions.")
+        self.added_toggle.toggled.connect(self.viewer.show_additions)
+        control_row.addWidget(self.added_toggle)
+        self.removed_toggle = QPushButton("Removals")
+        self.removed_toggle.setCheckable(True)
+        self.removed_toggle.setChecked(True)
+        self.removed_toggle.setToolTip("Show or hide removed change regions.")
+        self.removed_toggle.toggled.connect(self.viewer.show_removals)
+        control_row.addWidget(self.removed_toggle)
+        self.regions_toggle = QPushButton("Regions")
+        self.regions_toggle.setCheckable(True)
+        self.regions_toggle.setChecked(True)
+        self.regions_toggle.setToolTip("Show or hide all change-region boxes.")
+        self.regions_toggle.toggled.connect(self.viewer.show_regions)
+        control_row.addWidget(self.regions_toggle)
+        self.blink_toggle = QPushButton("Blink")
+        self.blink_toggle.setCheckable(True)
+        self.blink_toggle.setChecked(True)
+        self.blink_toggle.setToolTip("Turn the change-region pulse animation on or off.")
+        self.blink_toggle.toggled.connect(self.viewer.blink_regions)
+        control_row.addWidget(self.blink_toggle)
+
+        fit_button = QPushButton("Fit")
+        fit_button.clicked.connect(self.viewer.fit_to_page)
+        control_row.addWidget(fit_button)
+        actual_size_button = QPushButton("1:1")
+        actual_size_button.clicked.connect(self.viewer.reset_view)
+        control_row.addWidget(actual_size_button)
+        return control_row
+
+    def _set_blend(self, value: int) -> None:
+        self.blend_label.setText(f"Old (red) ← {value}% → New (blue)")
+        self.viewer.set_blend(value)
 
     def _file_row(self, form: QFormLayout, label: str, placeholder: str) -> PdfPathEdit:
         edit = PdfPathEdit()
@@ -170,17 +219,6 @@ class PdfDifferencesWindow(QMainWindow):
         row.addWidget(browse)
         form.addRow(label, row)
         return edit
-
-    @staticmethod
-    def _viewer_panel(title: str, viewer: PageViewer) -> QWidget:
-        panel = QWidget()
-        panel_layout = QVBoxLayout(panel)
-        panel_layout.setContentsMargins(0, 0, 0, 0)
-        label = QLabel(title)
-        label.setObjectName("viewerTitle")
-        panel_layout.addWidget(label)
-        panel_layout.addWidget(viewer, 1)
-        return panel
 
     def _results_panel(self) -> QWidget:
         panel = QWidget()
@@ -336,7 +374,7 @@ class PdfDifferencesWindow(QMainWindow):
             **result.counts,
         }
         for key, card in self.cards.items():
-            card.setText(f"{values.get(key, 0)}\n{key.title()}")
+            card.setText(f"{key.title()}: {values.get(key, 0)}")
 
         with QSignalBlocker(self.page_selector):
             self.page_selector.clear()
@@ -366,7 +404,7 @@ class PdfDifferencesWindow(QMainWindow):
         relevant_only = self.relevant_only_filter.isChecked()
         self.table.setRowCount(0)
         for change in self._changes:
-            tier = change.match_tier.value if change.match_tier else ""
+            tier = change.match_tier.value if change.match_tier else "unmatched"
             searchable = " ".join(
                 (
                     str(change.page_index + 1),
@@ -391,7 +429,9 @@ class PdfDifferencesWindow(QMainWindow):
 
             row = self.table.rowCount()
             self.table.insertRow(row)
-            score = f"{change.similarity_score:.3f}" if change.similarity_score is not None else ""
+            score = (
+                f"{change.similarity_score:.3f}" if change.similarity_score is not None else "N/A"
+            )
             values = (
                 str(change.page_index + 1),
                 change.change_type.value,
@@ -405,8 +445,6 @@ class PdfDifferencesWindow(QMainWindow):
             )
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
-                if column == 1:
-                    item.setForeground(_ROW_COLORS[change.change_type])
                 self.table.setItem(row, column, item)
             self.table.item(row, 0).setData(Qt.ItemDataRole.UserRole, change.id)
 
@@ -435,21 +473,15 @@ class PdfDifferencesWindow(QMainWindow):
                 with QSignalBlocker(self.page_selector):
                     self.page_selector.setCurrentIndex(index)
                 break
-        changes = [change for change in self.result.changes if change.page_index == page_index]
-        self.old_view.load_page(
+        page_result = next(page for page in self.result.pages if page.page_index == page_index)
+        self.viewer.load_page(
             self._old_path,
-            page_index,
-            changes,
-            selected_id,
-            old_side=True,
-        )
-        self.new_view.load_page(
             self._new_path,
-            page_index,
-            changes,
+            page_result,
+            page_result.changes,
             selected_id,
-            old_side=False,
         )
+        self.viewer.set_blend(self.blend_slider.value())
 
     def _destination(self, extension: str) -> str:
         path, _ = QFileDialog.getSaveFileName(
@@ -519,27 +551,6 @@ def main() -> int:
     application = QApplication.instance() or QApplication(sys.argv)
     application.setApplicationName("PDF Differences Objects")
     application.setOrganizationName("PDF Differences Objects")
-    application.setStyleSheet(
-        """
-        QMainWindow { background: #f8fafc; }
-        QLabel#title { font-size: 25px; font-weight: 700; color: #18324b; }
-        QLabel#subtitle { color: #536577; padding-bottom: 3px; }
-        QLabel#summary { background: #eef5ff; border-radius: 6px; padding: 8px; }
-        QLabel#notes { color: #536577; font-size: 11px; }
-        QLabel#viewerTitle { font-weight: 600; color: #263746; }
-        QLabel#card {
-            background: white;
-            border: 1px solid #dbe3ea;
-            border-radius: 8px;
-            padding: 8px;
-            font-size: 15px;
-        }
-        QPushButton { padding: 6px 12px; }
-        QPushButton#primary { background: #246bce; color: white; font-weight: 600; }
-        QLineEdit, QComboBox { padding: 5px; }
-        QTableWidget { background: white; alternate-background-color: #f5f8fb; }
-        """
-    )
     window = PdfDifferencesWindow()
     window.show()
     return application.exec()

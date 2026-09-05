@@ -68,9 +68,12 @@ In the app:
 
 1. Select or drop the baseline and revised PDFs.
 2. Choose **Compare PDFs**.
-3. Filter by change type, parser category, free text, or inspection relevance.
-4. Select a row to synchronize and focus both drawing previews.
-5. Export structured JSON, CSV, or an annotated copy of the revised PDF.
+3. Review the aligned revisions in one overlay: old content is red and new
+   content is blue. Drag the slider or use **Old**, **Differences**, and **New**.
+4. Toggle addition/removal boxes or their blinking, then select a table row to
+   focus its region.
+5. Filter by change type, parser category, free text, or inspection relevance.
+6. Export structured JSON, CSV, or an annotated copy of the revised PDF.
 
 The sample pair in `samples/mechanical_pair` is completely vector-native:
 

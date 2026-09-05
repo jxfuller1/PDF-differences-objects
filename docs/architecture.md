@@ -29,7 +29,7 @@ geometry changes on that page cannot be observed.
 | `comparison.py` | Page orchestration, change typing, traceability, and summaries |
 | `mechanical.py` | Mechanical parser buckets and inspection-relevance reasons |
 | `reporting.py` | JSON, CSV, and vector annotation exports |
-| `ui/` | Background worker, synchronized PDF previews, filtering, and export workflow |
+| `ui/` | Background worker, aligned red/blue overlay preview, filtering, and export workflow |
 
 ## Entity representation
 
@@ -128,9 +128,13 @@ entity counts, notes, and exact dimensions. Reordered pages are not inferred.
 
 The PyQt6 main window owns a `QThread` worker. Progress is emitted only at safe
 stage boundaries; cancellation is checked between validation, extraction,
-alignment, and matching stages. Selecting a change synchronizes both page
-previews and focuses its old/new bounding boxes. Preview documents are opened,
-rendered, and closed per load so file handles do not leak.
+alignment, and matching stages. Selecting a change focuses its box in a single
+overlaid page view. The old render is tinted red, transformed into the new
+page's registered coordinate frame, and overlaid with the blue new render. A
+slider controls their display opacity, while independently toggleable change
+boxes pulse for review. These rendered pixels remain display-only and never
+enter the comparison pipeline. Preview documents are opened, rendered, and
+closed per load so file handles do not leak.
 
 ## Outputs
 
