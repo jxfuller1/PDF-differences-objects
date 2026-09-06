@@ -10,6 +10,7 @@ from pathlib import Path
 import pymupdf as fitz
 
 from pdf_differences.alignment import estimate_alignment, transform_bbox
+from pdf_differences.callouts import reconstruct_callouts
 from pdf_differences.config import SETTINGS, ComparisonSettings
 from pdf_differences.errors import AlignmentError, ComparisonCancelled
 from pdf_differences.extraction import extract_page_entities
@@ -19,6 +20,7 @@ from pdf_differences.models import (
     AlignmentResult,
     BBox,
     Change,
+    ChangeCategory,
     ChangeType,
     ComparisonResult,
     Entity,
@@ -64,8 +66,17 @@ def _interpret(
     bbox: BBox,
     context: tuple[Entity, ...],
     settings: ComparisonSettings,
+    category_hint: ChangeCategory | None = None,
 ) -> Interpretation:
-    return interpret_change(kind, before_text, after_text, bbox, context, settings)
+    return interpret_change(
+        kind,
+        before_text,
+        after_text,
+        bbox,
+        context,
+        settings,
+        category_hint=category_hint,
+    )
 
 
 def _unmatched_change(
@@ -86,6 +97,7 @@ def _unmatched_change(
         entity.bbox,
         context,
         settings,
+        entity.callout_category,
     )
     action = "removed" if removed else "added"
     return Change(
@@ -108,6 +120,8 @@ def _unmatched_change(
         new_entity_id=entity.id if not removed else None,
         before_text=before_text,
         after_text=after_text,
+        old_member_entity_ids=entity.callout_member_ids if removed else (),
+        new_member_entity_ids=entity.callout_member_ids if not removed else (),
     )
 
 
@@ -120,6 +134,11 @@ def _modification_kinds(match: EntityMatch, settings: ComparisonSettings) -> tup
             kinds.append("text")
         if match.old.font_size != match.new.font_size or match.old.font_name != match.new.font_name:
             kinds.append("text-style")
+        if (
+            match.old.callout_category is not None
+            and match.old.shape_signature != match.new.shape_signature
+        ):
+            kinds.append("callout-structure")
     else:
         geometry_changed = match.old.shape_signature != match.new.shape_signature
         if geometry_changed:
@@ -139,6 +158,7 @@ def _modification_kinds(match: EntityMatch, settings: ComparisonSettings) -> tup
 def _matched_change(
     match: EntityMatch,
     context: tuple[Entity, ...],
+    transform: Transform,
     settings: ComparisonSettings,
 ) -> Change | None:
     if match.tier == MatchTier.EXACT:
@@ -156,11 +176,21 @@ def _matched_change(
         match.new.bbox,
         context,
         settings,
+        match.new.callout_category or match.old.callout_category,
     )
     if before_text is not None or after_text is not None:
         detail = f"{before_text!r} -> {after_text!r} ({', '.join(kinds)})"
     else:
         detail = "Vector entity changed: " + ", ".join(kinds) + "."
+    display_bbox = match.new.bbox
+    if match.old.callout_category is not None or match.new.callout_category is not None:
+        aligned_old_bbox = transform_bbox(match.old.bbox, transform)
+        display_bbox = (
+            min(aligned_old_bbox[0], match.new.bbox[0]),
+            min(aligned_old_bbox[1], match.new.bbox[1]),
+            max(aligned_old_bbox[2], match.new.bbox[2]),
+            max(aligned_old_bbox[3], match.new.bbox[3]),
+        )
     return Change(
         id=_change_id(match.old.page_index, change_type, match.old.id, match.new.id),
         page_index=match.old.page_index,
@@ -168,7 +198,7 @@ def _matched_change(
         category=interpretation.category,
         inspection_relevant=interpretation.relevant,
         relevance_reason=interpretation.reason,
-        bbox=match.new.bbox,
+        bbox=display_bbox,
         old_bbox=match.old.bbox,
         label=_entity_label(match.new),
         detail=detail,
@@ -179,6 +209,8 @@ def _matched_change(
         after_text=after_text,
         match_tier=match.tier,
         similarity_score=match.score,
+        old_member_entity_ids=match.old.callout_member_ids,
+        new_member_entity_ids=match.new.callout_member_ids,
     )
 
 
@@ -192,7 +224,7 @@ def _changes_from_match(
     changes = [
         change
         for match in matches.matches
-        if (change := _matched_change(match, new_context, settings)) is not None
+        if (change := _matched_change(match, new_context, transform, settings)) is not None
     ]
     changes.extend(
         _unmatched_change(entity, ChangeType.REMOVED, transform, old_context, settings)
@@ -283,7 +315,7 @@ def _summary(pages: tuple[PageResult, ...]) -> str:
         relevance_text = "None matched the configured deterministic inspection-relevance rules."
     affected = sum(page.affected_area_fraction for page in pages) / max(1, len(pages))
     return (
-        f"Detected {len(changes)} entity-level changes: {type_text}. {relevance_text} "
+        f"Detected {len(changes)} structured changes: {type_text}. {relevance_text} "
         f"Change boxes cover {affected * 100:.2f}% of the average compared page area."
     )
 
@@ -370,8 +402,21 @@ def compare_pdfs(
 
             _check_cancel(cancelled)
             _emit(progress, "matching", fraction + 0.03, f"Tier-matching page {page_index + 1}")
-            outcome = match_entities(old_entities, new_entities, transform, settings)
-            changes = _changes_from_match(outcome, old_entities, new_entities, transform, settings)
+            old_matching_entities = reconstruct_callouts(old_entities, settings)
+            new_matching_entities = reconstruct_callouts(new_entities, settings)
+            outcome = match_entities(
+                old_matching_entities,
+                new_matching_entities,
+                transform,
+                settings,
+            )
+            changes = _changes_from_match(
+                outcome,
+                old_matching_entities,
+                new_matching_entities,
+                transform,
+                settings,
+            )
             if alignment.note:
                 notes.append(alignment.note)
             page_results.append(

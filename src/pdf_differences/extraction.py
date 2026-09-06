@@ -13,7 +13,7 @@ from typing import Any
 
 import pymupdf as fitz
 
-from pdf_differences.models import BBox, Entity, EntityKind, Point
+from pdf_differences.models import BBox, Entity, EntityKind, Point, Segment
 
 _ROUND = 6
 _WHITE_THRESHOLD = 0.995
@@ -122,6 +122,14 @@ def _polyline_length(points: tuple[Point, ...], close: bool = False) -> float:
     return sum(math.dist(first, second) for first, second in pairs)
 
 
+def _segments_for_item(operation: str, points: tuple[Point, ...]) -> tuple[Segment, ...]:
+    if operation == "l" and len(points) >= 2:
+        return ((points[0], points[1]),)
+    if operation in {"re", "qu"} and len(points) >= 4:
+        return tuple((points[index], points[(index + 1) % 4]) for index in range(4))
+    return ()
+
+
 def _geometry_entity(
     page_index: int, source_index: int, drawing: dict[str, Any], page: fitz.Page
 ) -> Entity | None:
@@ -132,6 +140,7 @@ def _geometry_entity(
     operations: list[str] = []
     encoded_items: list[str] = []
     all_points: list[Point] = []
+    geometry_segments: list[Segment] = []
     total_length = 0.0
 
     for raw_item in drawing.get("items", []):
@@ -141,6 +150,7 @@ def _geometry_entity(
             continue
         operations.append(operation)
         all_points.extend(points)
+        geometry_segments.extend(_segments_for_item(operation, points))
         total_length += _polyline_length(points, close=operation in {"re", "qu"})
         encoded_items.append(
             operation + ":" + ";".join(f"{x:.{_ROUND}f},{y:.{_ROUND}f}" for x, y in points)
@@ -191,6 +201,7 @@ def _geometry_entity(
         op_histogram=op_histogram,
         primitive_count=len(operations),
         path_length=round(total_length, _ROUND),
+        geometry_segments=tuple(geometry_segments),
     )
 
 
@@ -198,11 +209,12 @@ def _text_entities(page: fitz.Page, page_index: int) -> Iterable[Entity]:
     width = max(float(page.rect.width), 1.0)
     height = max(float(page.rect.height), 1.0)
     source_index = 0
-    for block in page.get_text("dict").get("blocks", []):
+    for block_index, block in enumerate(page.get_text("dict").get("blocks", [])):
         if block.get("type") != 0:
             continue
-        for line in block.get("lines", []):
-            for span in line.get("spans", []):
+        for line_index, line in enumerate(block.get("lines", [])):
+            direction = tuple(float(value) for value in line.get("dir", (1.0, 0.0)))
+            for span_index, span in enumerate(line.get("spans", [])):
                 text = normalize_text(span.get("text") or "")
                 alpha = span.get("alpha")
                 if not text or (alpha is not None and int(alpha) <= 0):
@@ -243,6 +255,10 @@ def _text_entities(page: fitz.Page, page_index: int) -> Iterable[Entity]:
                     text_normalized=text.casefold(),
                     font_name=font_name,
                     font_size=round(relative_size, _ROUND),
+                    source_block_index=block_index,
+                    source_line_index=line_index,
+                    source_span_index=span_index,
+                    writing_direction=(direction[0], direction[1]),
                 )
                 source_index += 1
 

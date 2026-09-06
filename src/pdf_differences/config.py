@@ -31,6 +31,20 @@ class ComparisonSettings:
     # Dense NumPy-backed Hungarian assignment is faster below the threshold.
     sparse_assignment_threshold: int = 1200
 
+    # Semantic callout reconstruction. Spatial tests only nominate candidates;
+    # dimension grammar, frame containment, or leader attachment must approve
+    # every group.
+    callout_inline_gap_factor: float = 2.75
+    callout_baseline_tolerance_factor: float = 0.55
+    callout_stacked_gap_factor: float = 2.25
+    callout_frame_edge_tolerance: float = 0.003
+    callout_max_frame_height: float = 0.08
+    callout_max_frame_width: float = 0.55
+    callout_leader_touch_factor: float = 1.25
+    callout_attachment_ambiguity_factor: float = 0.35
+    callout_attachment_match_tolerance: float = 0.035
+    callout_match_ambiguity_margin: float = 0.055
+
     # Text/geometry interpretation.
     nearby_annotation_radius: float = 0.035
     title_block_x_min: float = 0.62

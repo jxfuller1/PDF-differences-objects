@@ -36,6 +36,67 @@ def make_drawing_pdf(
     return path
 
 
+def make_fragmented_callout_pdf(
+    path: Path,
+    *,
+    nominal: str = ".255",
+    nominal_x: float = 190,
+    lower_tolerance: str = "-.000",
+    include_dimension: bool = True,
+    include_both_sides: bool = True,
+    gdt_tolerance: str = ".010",
+) -> Path:
+    """Create stable CAD-like anchors plus deliberately fragmented callouts."""
+
+    document = fitz.open()
+    page = document.new_page(width=600, height=400)
+
+    # Stable drawing content gives alignment several independent anchors.
+    page.draw_rect(fitz.Rect(40, 40, 110, 90), width=1.0)
+    page.draw_line(fitz.Point(470, 45), fitz.Point(540, 95), width=1.0)
+    page.insert_text(fitz.Point(45, 360), "PART CALLOUT TEST", fontsize=10)
+    page.insert_text(fitz.Point(470, 360), "SHEET 1", fontsize=10)
+
+    # A leader is present in both revisions. It provides attachment context but
+    # deliberately remains outside the callout's union box.
+    page.draw_line(fitz.Point(142, 126), fitz.Point(80, 205), width=0.8)
+    if include_dimension:
+        dimension_parts = [
+            (140, 120, "4X"),
+            (160, 120, "DIA"),
+            (nominal_x, 120, nominal),
+            (224, 114, "+.010"),
+            (224, 128, lower_tolerance),
+        ]
+        if include_both_sides:
+            dimension_parts.append((263, 120, "BOTH SIDES"))
+        for x, y, text in dimension_parts:
+            page.insert_text(fitz.Point(x, y), text, fontsize=11)
+
+    # Nearby administrative labels are intentionally close enough to be
+    # tempting spatial candidates but are not dimension grammar.
+    page.insert_text(fitz.Point(132, 92), "SECTION E-E", fontsize=11)
+    page.insert_text(fitz.Point(275, 92), "SCALE 4:1", fontsize=11)
+
+    # Each GD&T cell is a separate PDF vector object and each value is a
+    # separate text span, matching common CAD exporter output.
+    cell_lefts = (140, 205, 255, 295)
+    cell_rights = (205, 255, 295, 335)
+    for left, right in zip(cell_lefts, cell_rights, strict=True):
+        page.draw_rect(fitz.Rect(left, 150, right, 177), width=0.8)
+    for x, text in (
+        (145, "POSITION"),
+        (212, gdt_tolerance),
+        (267, "A"),
+        (307, "B"),
+    ):
+        page.insert_text(fitz.Point(x, 169), text, fontsize=9)
+
+    document.save(path)
+    document.close()
+    return path
+
+
 def make_text_only_pdf(path: Path) -> Path:
     document = fitz.open()
     page = document.new_page(width=300, height=200)

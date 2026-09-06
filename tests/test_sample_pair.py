@@ -42,6 +42,7 @@ def test_production_has_no_image_ocr_pytorch_or_scipy_dependencies():
         root / "src" / "pdf_differences" / name
         for name in (
             "alignment.py",
+            "callouts.py",
             "comparison.py",
             "extraction.py",
             "matching.py",

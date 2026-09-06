@@ -116,6 +116,55 @@ def _position_score(distance: float, radius: float) -> float:
     return max(0.0, 1.0 - distance / max(radius, 1e-9))
 
 
+def _is_callout(entity: Entity) -> bool:
+    return entity.callout_category is not None
+
+
+def _callout_pair_features(
+    old: Entity,
+    new: Entity,
+    transform: Transform,
+    settings: ComparisonSettings,
+) -> tuple[float, float] | None:
+    """Return topology and attachment agreement for compatible callouts."""
+
+    if not _is_callout(old) or not _is_callout(new):
+        return None
+    if old.callout_category != new.callout_category:
+        return None
+    old_family = old.callout_structure.split(":", 1)[0]
+    new_family = new.callout_structure.split(":", 1)[0]
+    if old_family != new_family:
+        return None
+    if old_family == "dimension" and old.callout_structure != new.callout_structure:
+        return None
+
+    topology = _text_similarity(old.callout_structure, new.callout_structure)
+    old_attachments = tuple(
+        transform_point(point, transform) for point in old.callout_attachment_points
+    )
+    new_attachments = new.callout_attachment_points
+    if old_attachments and new_attachments:
+        old_to_new = tuple(
+            min(math.dist(old_point, new_point) for new_point in new_attachments)
+            for old_point in old_attachments
+        )
+        new_to_old = tuple(
+            min(math.dist(new_point, old_point) for old_point in old_attachments)
+            for new_point in new_attachments
+        )
+        distances = (*old_to_new, *new_to_old)
+        if max(distances) > settings.callout_attachment_match_tolerance:
+            return None
+        distance = sum(distances) / len(distances)
+        attachment = _position_score(distance, settings.callout_attachment_match_tolerance)
+    elif old_attachments or new_attachments:
+        attachment = 0.2
+    else:
+        attachment = 0.5
+    return topology, attachment
+
+
 def attribute_score(
     old: Entity,
     new: Entity,
@@ -128,6 +177,8 @@ def attribute_score(
 
     if old.kind != new.kind:
         return 0.0
+    if _is_callout(old) != _is_callout(new):
+        return 0.0
     distance = registered_distance(old, new, transform)
     if distance > settings.attribute_position_tolerance:
         return 0.0
@@ -135,6 +186,16 @@ def attribute_score(
     style = float(old.style_signature == new.style_signature)
     aligned_bbox = transform_bbox(old.bbox, transform)
     if old.kind == EntityKind.TEXT:
+        if _is_callout(old):
+            callout = _callout_pair_features(old, new, transform, settings)
+            if callout is None:
+                return 0.0
+            topology, attachment = callout
+            size = _ratio(old.font_size * transform.scale, new.font_size)
+            content = _text_similarity(old.text_normalized, new.text_normalized)
+            return (
+                0.34 * position + 0.22 * content + 0.18 * topology + 0.20 * attachment + 0.06 * size
+            )
         old_category = classify_text(old.text, old.bbox, old_page)
         new_category = classify_text(new.text, new.bbox, new_page)
         category = float(old_category == new_category)
@@ -157,15 +218,34 @@ def structural_score(
     old_page: tuple[Entity, ...],
     new_page: tuple[Entity, ...],
     settings: ComparisonSettings = SETTINGS,
+    *,
+    transform: Transform | None = None,
 ) -> float:
     """Deterministic substitute for a learned embedding similarity."""
 
-    if old.kind != new.kind or distance > settings.structural_search_radius:
+    if (
+        old.kind != new.kind
+        or _is_callout(old) != _is_callout(new)
+        or distance > settings.structural_search_radius
+    ):
         return 0.0
     context = _context_similarity(old_context[old.id], new_context[new.id])
     position = _position_score(distance, settings.structural_search_radius)
     style = float(old.style_signature == new.style_signature)
     if old.kind == EntityKind.TEXT:
+        if _is_callout(old):
+            callout = _callout_pair_features(old, new, transform or Transform(), settings)
+            if callout is None:
+                return 0.0
+            topology, attachment = callout
+            content = _text_similarity(old.text_normalized, new.text_normalized)
+            return (
+                0.28 * content
+                + 0.19 * topology
+                + 0.22 * attachment
+                + 0.17 * position
+                + 0.14 * context
+            )
         content = _text_similarity(old.text_normalized, new.text_normalized)
         category = float(
             classify_text(old.text, old.bbox, old_page)
@@ -208,6 +288,38 @@ def _greedy_assign(
         used_new.add(new_index)
         matches.append(EntityMatch(old[old_index], new[new_index], tier, round(score, 6), distance))
     return matches, used_old, used_new
+
+
+def _reject_ambiguous_callout_candidates(
+    candidates: list[tuple[float, float, int, int]],
+    old: tuple[Entity, ...],
+    new: tuple[Entity, ...],
+    margin: float,
+) -> list[tuple[float, float, int, int]]:
+    """Decline materially tied callout matches instead of forcing a swap."""
+
+    by_old: dict[int, list[float]] = defaultdict(list)
+    by_new: dict[int, list[float]] = defaultdict(list)
+    for score, _distance, old_index, new_index in candidates:
+        if _is_callout(old[old_index]) and _is_callout(new[new_index]):
+            by_old[old_index].append(score)
+            by_new[new_index].append(score)
+
+    def ambiguous(groups: dict[int, list[float]]) -> set[int]:
+        output: set[int] = set()
+        for index, scores in groups.items():
+            ordered = sorted(scores, reverse=True)
+            if len(ordered) > 1 and ordered[0] - ordered[1] < margin:
+                output.add(index)
+        return output
+
+    ambiguous_old = ambiguous(by_old)
+    ambiguous_new = ambiguous(by_new)
+    return [
+        candidate
+        for candidate in candidates
+        if candidate[2] not in ambiguous_old and candidate[3] not in ambiguous_new
+    ]
 
 
 def _candidate_components(
@@ -348,9 +460,21 @@ def match_entities(
     exact_candidates: list[tuple[float, float, int, int]] = []
     for old_index, entity in enumerate(old):
         for new_index in new_by_signature.get((entity.kind, entity.content_signature), []):
-            distance = registered_distance(entity, new[new_index], transform)
+            candidate = new[new_index]
+            if (
+                _is_callout(entity)
+                and _callout_pair_features(entity, candidate, transform, settings) is None
+            ):
+                continue
+            distance = registered_distance(entity, candidate, transform)
             if distance <= settings.exact_position_tolerance:
                 exact_candidates.append((1.0, distance, old_index, new_index))
+    exact_candidates = _reject_ambiguous_callout_candidates(
+        exact_candidates,
+        old,
+        new,
+        settings.callout_match_ambiguity_margin,
+    )
     assigned, exact_old, exact_new = _greedy_assign(exact_candidates, old, new, MatchTier.EXACT)
     all_matches.extend(assigned)
     used_old.update(exact_old)
@@ -375,6 +499,12 @@ def match_entities(
         )
         if score >= settings.attribute_min_score:
             attribute_candidates.append((score, distance, old_index, new_index))
+    attribute_candidates = _reject_ambiguous_callout_candidates(
+        attribute_candidates,
+        rem_old,
+        rem_new,
+        settings.callout_match_ambiguity_margin,
+    )
     assigned, attribute_old, attribute_new = _greedy_assign(
         attribute_candidates, rem_old, rem_new, MatchTier.ATTRIBUTE
     )
@@ -409,9 +539,23 @@ def match_entities(
                 old,
                 new,
                 settings,
+                transform=transform,
             )
             if score >= settings.structural_min_score:
                 structural_candidates[(old_index, new_index)] = (score, distance)
+    filtered_structural = _reject_ambiguous_callout_candidates(
+        [
+            (score, distance, old_index, new_index)
+            for (old_index, new_index), (score, distance) in structural_candidates.items()
+        ],
+        rem2_old,
+        rem2_new,
+        settings.callout_match_ambiguity_margin,
+    )
+    structural_candidates = {
+        (old_index, new_index): (score, distance)
+        for score, distance, old_index, new_index in filtered_structural
+    }
     assigned, structural_old, structural_new = _hungarian_assign(
         structural_candidates,
         rem2_old,
