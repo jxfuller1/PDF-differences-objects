@@ -38,8 +38,14 @@ class ComparisonSettings:
     callout_baseline_tolerance_factor: float = 0.55
     callout_stacked_gap_factor: float = 2.25
     callout_frame_edge_tolerance: float = 0.003
+    # Much tighter than frame containment: this only reconciles coordinate
+    # noise while rebuilding local line topology from CAD drawing records.
+    callout_segment_connect_tolerance: float = 0.0002
+    callout_min_frame_height: float = 0.003
+    callout_min_frame_cell_width: float = 0.002
     callout_max_frame_height: float = 0.08
     callout_max_frame_width: float = 0.55
+    callout_max_frame_cells: int = 12
     callout_leader_touch_factor: float = 1.25
     callout_attachment_ambiguity_factor: float = 0.35
     callout_attachment_match_tolerance: float = 0.035

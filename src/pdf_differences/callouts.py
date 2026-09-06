@@ -14,6 +14,7 @@ import math
 import re
 from collections import Counter, defaultdict, deque
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from pdf_differences.config import SETTINGS, ComparisonSettings
 from pdf_differences.models import BBox, ChangeCategory, Entity, EntityKind, Point
@@ -114,6 +115,18 @@ def _point_bbox_distance(point: Point, box: BBox) -> float:
 
 def _height(entity: Entity) -> float:
     return max(entity.height, entity.font_size, 1e-5)
+
+
+def _leaf_member_ids(entity: Entity) -> tuple[str, ...]:
+    """Return original inventory IDs represented by a temporary fragment."""
+
+    return entity.callout_member_ids or (entity.id,)
+
+
+def _flatten_member_ids(entities: Iterable[Entity]) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(member_id for entity in entities for member_id in _leaf_member_ids(entity))
+    )
 
 
 def _same_direction(first: Entity, second: Entity) -> bool:
@@ -308,6 +321,84 @@ def _dimension_text(entities: Iterable[Entity]) -> str:
     )
 
 
+def _merged_text_fragment(parts: Iterable[Entity], text: str) -> Entity:
+    members = tuple(sorted(parts, key=lambda entity: (entity.bbox[0], entity.id)))
+    bbox = _bbox_union(members)
+    page_index = members[0].page_index
+    member_ids = _flatten_member_ids(members)
+    style_signature = _digest(*(entity.style_signature for entity in members))
+    content_signature = _digest("text-fragment", _clean(text).casefold(), style_signature)
+    seed = _digest(page_index, *member_ids, content_signature, length=16)
+    font_sizes = sorted(entity.font_size for entity in members if entity.font_size > 0.0)
+    font_size = font_sizes[len(font_sizes) // 2] if font_sizes else 0.0
+    block_indices = {entity.source_block_index for entity in members}
+    line_indices = {entity.source_line_index for entity in members}
+    return Entity(
+        id=f"p{page_index + 1}-f-{seed}",
+        page_index=page_index,
+        kind=EntityKind.TEXT,
+        bbox=bbox,
+        anchor=(bbox[0], sum(entity.anchor[1] for entity in members) / len(members)),
+        content_signature=content_signature,
+        shape_signature="text-fragment",
+        style_signature=style_signature,
+        text=_clean(text),
+        text_normalized=_clean(text).casefold(),
+        font_name="fragment",
+        font_size=font_size,
+        source_block_index=block_indices.pop() if len(block_indices) == 1 else -1,
+        source_line_index=line_indices.pop() if len(line_indices) == 1 else -1,
+        writing_direction=members[0].writing_direction,
+        callout_member_ids=member_ids,
+    )
+
+
+def _signed_tolerance_fragments(
+    text_entities: Iterable[Entity],
+    settings: ComparisonSettings,
+) -> tuple[Entity, ...]:
+    """Join CAD-exported standalone signs to their numeric tolerance spans."""
+
+    material = tuple(text_entities)
+    signs = tuple(entity for entity in material if _clean(entity.text) in {"+", "-"})
+    numbers = tuple(entity for entity in material if _NUMBER_RE.fullmatch(_clean(entity.text)))
+    used: set[str] = set()
+    fragments: list[Entity] = []
+    for sign in sorted(signs, key=lambda entity: (entity.bbox, entity.id)):
+        candidates: list[tuple[float, Entity]] = []
+        for number in numbers:
+            if number.id in used or not _same_direction(sign, number):
+                continue
+            scale = max(_height(sign), _height(number))
+            if not (0.5 <= _height(sign) / _height(number) <= 2.0):
+                continue
+            if number.bbox[0] < sign.bbox[0]:
+                continue
+            gap = max(0.0, number.bbox[0] - sign.bbox[2])
+            baseline_delta = abs(sign.anchor[1] - number.anchor[1])
+            if (
+                gap > 0.75 * settings.callout_inline_gap_factor * scale
+                or baseline_delta > settings.callout_baseline_tolerance_factor * scale
+            ):
+                continue
+            candidates.append((gap + baseline_delta, number))
+        candidates.sort(key=lambda item: (item[0], item[1].bbox, item[1].id))
+        if not candidates:
+            continue
+        ambiguity = max(0.0005, 0.15 * max(_height(sign), _height(candidates[0][1])))
+        if len(candidates) > 1 and candidates[1][0] - candidates[0][0] <= ambiguity:
+            continue
+        number = candidates[0][1]
+        used.update((sign.id, number.id))
+        fragments.append(
+            _merged_text_fragment((sign, number), f"{_clean(sign.text)}{_clean(number.text)}")
+        )
+
+    output = [entity for entity in material if entity.id not in used]
+    output.extend(fragments)
+    return tuple(sorted(output, key=lambda entity: (entity.bbox, entity.id)))
+
+
 def _attachment_points(
     bbox: BBox,
     text_height: float,
@@ -399,6 +490,379 @@ def _is_rectangle(entity: Entity) -> bool:
     )
 
 
+def _segment_bbox(segment: tuple[Point, Point]) -> BBox:
+    first, second = segment
+    return (
+        min(first[0], second[0]),
+        min(first[1], second[1]),
+        max(first[0], second[0]),
+        max(first[1], second[1]),
+    )
+
+
+def _point_segment_distance(point: Point, segment: tuple[Point, Point]) -> float:
+    first, second = segment
+    dx = second[0] - first[0]
+    dy = second[1] - first[1]
+    denominator = dx * dx + dy * dy
+    if denominator <= 1e-20:
+        return math.dist(point, first)
+    projection = ((point[0] - first[0]) * dx + (point[1] - first[1]) * dy) / denominator
+    projection = min(1.0, max(0.0, projection))
+    nearest = (first[0] + projection * dx, first[1] + projection * dy)
+    return math.dist(point, nearest)
+
+
+def _segments_touch(
+    first: tuple[Point, Point],
+    second: tuple[Point, Point],
+    tolerance: float,
+) -> bool:
+    first_bbox = _segment_bbox(first)
+    second_bbox = _segment_bbox(second)
+    if (
+        first_bbox[2] + tolerance < second_bbox[0]
+        or second_bbox[2] + tolerance < first_bbox[0]
+        or first_bbox[3] + tolerance < second_bbox[1]
+        or second_bbox[3] + tolerance < first_bbox[1]
+    ):
+        return False
+
+    def cross(origin: Point, left: Point, right: Point) -> float:
+        return (left[0] - origin[0]) * (right[1] - origin[1]) - (left[1] - origin[1]) * (
+            right[0] - origin[0]
+        )
+
+    first_a, first_b = first
+    second_a, second_b = second
+    first_side_a = cross(first_a, first_b, second_a)
+    first_side_b = cross(first_a, first_b, second_b)
+    second_side_a = cross(second_a, second_b, first_a)
+    second_side_b = cross(second_a, second_b, first_b)
+    if first_side_a * first_side_b <= 0.0 and second_side_a * second_side_b <= 0.0:
+        return True
+    return (
+        min(
+            _point_segment_distance(first_a, second),
+            _point_segment_distance(first_b, second),
+            _point_segment_distance(second_a, first),
+            _point_segment_distance(second_b, first),
+        )
+        <= tolerance
+    )
+
+
+def _segment_components(
+    segments: tuple[tuple[Point, Point], ...],
+    tolerance: float,
+) -> tuple[tuple[int, ...], ...]:
+    if len(segments) < 2:
+        return (tuple(range(len(segments))),)
+    cell_size = max(0.01, tolerance * 8.0)
+    buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+    edges: dict[int, set[int]] = defaultdict(set)
+    for index, segment in enumerate(segments):
+        x0, y0, x1, y1 = _segment_bbox(segment)
+        x_start = math.floor((x0 - tolerance) / cell_size)
+        x_stop = math.floor((x1 + tolerance) / cell_size)
+        y_start = math.floor((y0 - tolerance) / cell_size)
+        y_stop = math.floor((y1 + tolerance) / cell_size)
+        keys = tuple((x, y) for x in range(x_start, x_stop + 1) for y in range(y_start, y_stop + 1))
+        possible = {other_index for key in keys for other_index in buckets.get(key, ())}
+        for other_index in possible:
+            if _segments_touch(segment, segments[other_index], tolerance):
+                edges[index].add(other_index)
+                edges[other_index].add(index)
+        for key in keys:
+            buckets[key].append(index)
+
+    unseen = set(range(len(segments)))
+    output: list[tuple[int, ...]] = []
+    while unseen:
+        seed = min(unseen)
+        queue = deque((seed,))
+        component: list[int] = []
+        while queue:
+            index = queue.popleft()
+            if index not in unseen:
+                continue
+            unseen.remove(index)
+            component.append(index)
+            queue.extend(sorted(edges.get(index, ())))
+        output.append(tuple(sorted(component)))
+    return tuple(output)
+
+
+def _geometry_component_entity(
+    parent: Entity,
+    component_indices: tuple[int, ...],
+) -> Entity:
+    segments = tuple(parent.geometry_segments[index] for index in component_indices)
+    points = tuple(point for segment in segments for point in segment)
+    bbox = (
+        min(point[0] for point in points),
+        min(point[1] for point in points),
+        max(point[0] for point in points),
+        max(point[1] for point in points),
+    )
+    cx = sum(point[0] for point in points) / len(points)
+    cy = sum(point[1] for point in points) / len(points)
+    relative_segments = tuple(
+        sorted(
+            (
+                round(first[0] - cx, 6),
+                round(first[1] - cy, 6),
+                round(second[0] - cx, 6),
+                round(second[1] - cy, 6),
+            )
+            for first, second in segments
+        )
+    )
+    shape_signature = _digest("geometry-component", *relative_segments)
+    content_signature = _digest("geometry", shape_signature, parent.style_signature)
+    seed = _digest(parent.id, *component_indices, content_signature, length=12)
+    return Entity(
+        id=f"{parent.id}-c-{seed}",
+        page_index=parent.page_index,
+        kind=EntityKind.GEOMETRY,
+        bbox=bbox,
+        anchor=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
+        content_signature=content_signature,
+        shape_signature=shape_signature,
+        style_signature=parent.style_signature,
+        op_histogram=(("l", len(segments)),),
+        primitive_count=len(segments),
+        path_length=round(sum(math.dist(*segment) for segment in segments), 6),
+        geometry_segments=segments,
+    )
+
+
+def _geometry_residual_entity(parent: Entity, children: Iterable[Entity]) -> Entity:
+    """Recombine unclaimed local components into one deterministic residual."""
+
+    remaining = Counter(segment for child in children for segment in child.geometry_segments)
+    component_indices: list[int] = []
+    for index, segment in enumerate(parent.geometry_segments):
+        if remaining[segment] <= 0:
+            continue
+        component_indices.append(index)
+        remaining[segment] -= 1
+    return _geometry_component_entity(parent, tuple(component_indices))
+
+
+def _local_geometry_entities(
+    entities: Iterable[Entity],
+    settings: ComparisonSettings,
+) -> tuple[tuple[Entity, ...], dict[str, tuple[Entity, ...]]]:
+    """Split disconnected straight-line batches without changing local paths."""
+
+    output: list[Entity] = []
+    children_by_parent: dict[str, tuple[Entity, ...]] = {}
+    for entity in entities:
+        operations = set(dict(entity.op_histogram))
+        if (
+            len(entity.geometry_segments) < 2
+            or not operations
+            or not operations <= {"l", "re", "qu"}
+        ):
+            output.append(entity)
+            children_by_parent[entity.id] = (entity,)
+            continue
+        components = _segment_components(
+            entity.geometry_segments,
+            settings.callout_segment_connect_tolerance,
+        )
+        if len(components) == 1:
+            output.append(entity)
+            children_by_parent[entity.id] = (entity,)
+            continue
+        children = tuple(_geometry_component_entity(entity, component) for component in components)
+        output.extend(children)
+        children_by_parent[entity.id] = children
+    return (
+        tuple(sorted(output, key=lambda entity: (entity.bbox, entity.id))),
+        children_by_parent,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _LineCoverage:
+    fixed: float
+    lo: float
+    hi: float
+    owner_ids: tuple[str, ...]
+
+
+def _merge_line_coverages(
+    values: Iterable[tuple[float, float, float, str]],
+    tolerance: float,
+) -> tuple[_LineCoverage, ...]:
+    ordered = sorted(values)
+    coordinate_groups: list[list[tuple[float, float, float, str]]] = []
+    for value in ordered:
+        if not coordinate_groups:
+            coordinate_groups.append([value])
+            continue
+        fixed = sum(item[0] for item in coordinate_groups[-1]) / len(coordinate_groups[-1])
+        if abs(value[0] - fixed) <= tolerance:
+            coordinate_groups[-1].append(value)
+        else:
+            coordinate_groups.append([value])
+
+    output: list[_LineCoverage] = []
+    for group in coordinate_groups:
+        fixed = sum(item[0] for item in group) / len(group)
+        intervals = sorted((lo, hi, owner_id) for _, lo, hi, owner_id in group)
+        current_lo, current_hi, first_owner = intervals[0]
+        owners = {first_owner}
+        for lo, hi, owner_id in intervals[1:]:
+            if lo <= current_hi + tolerance:
+                current_hi = max(current_hi, hi)
+                owners.add(owner_id)
+                continue
+            output.append(_LineCoverage(fixed, current_lo, current_hi, tuple(sorted(owners))))
+            current_lo, current_hi, owners = lo, hi, {owner_id}
+        output.append(_LineCoverage(fixed, current_lo, current_hi, tuple(sorted(owners))))
+    return tuple(output)
+
+
+def _axis_coverages(
+    geometry_entities: Iterable[Entity],
+    tolerance: float,
+) -> tuple[tuple[_LineCoverage, ...], tuple[_LineCoverage, ...]]:
+    horizontal: list[tuple[float, float, float, str]] = []
+    vertical: list[tuple[float, float, float, str]] = []
+    for entity in geometry_entities:
+        for first, second in entity.geometry_segments:
+            dx = abs(first[0] - second[0])
+            dy = abs(first[1] - second[1])
+            if dy <= tolerance and dx > 2.0 * tolerance:
+                horizontal.append(
+                    (
+                        0.5 * (first[1] + second[1]),
+                        min(first[0], second[0]),
+                        max(first[0], second[0]),
+                        entity.id,
+                    )
+                )
+            elif dx <= tolerance and dy > 2.0 * tolerance:
+                vertical.append(
+                    (
+                        0.5 * (first[0] + second[0]),
+                        min(first[1], second[1]),
+                        max(first[1], second[1]),
+                        entity.id,
+                    )
+                )
+    return (
+        _merge_line_coverages(horizontal, tolerance),
+        _merge_line_coverages(vertical, tolerance),
+    )
+
+
+def _coverage_owners(
+    coverages: Iterable[_LineCoverage],
+    fixed: float,
+    lo: float,
+    hi: float,
+    tolerance: float,
+) -> tuple[str, ...]:
+    owners: set[str] = set()
+    for coverage in coverages:
+        if (
+            abs(coverage.fixed - fixed) <= tolerance
+            and coverage.lo <= lo + tolerance
+            and coverage.hi >= hi - tolerance
+        ):
+            owners.update(coverage.owner_ids)
+    return tuple(sorted(owners))
+
+
+def _frame_cells_from_segments(
+    geometry_entities: tuple[Entity, ...],
+    settings: ComparisonSettings,
+) -> tuple[Entity, ...]:
+    tolerance = settings.callout_segment_connect_tolerance
+    horizontal, vertical = _axis_coverages(geometry_entities, tolerance)
+    if not horizontal or not vertical:
+        return ()
+
+    bands: set[tuple[float, float]] = set()
+    for wall in vertical:
+        crossings = sorted(
+            {
+                rail.fixed
+                for rail in horizontal
+                if wall.lo - tolerance <= rail.fixed <= wall.hi + tolerance
+                and rail.lo - tolerance <= wall.fixed <= rail.hi + tolerance
+            }
+        )
+        for top, bottom in zip(crossings, crossings[1:], strict=False):
+            height = bottom - top
+            if settings.callout_min_frame_height <= height <= settings.callout_max_frame_height:
+                bands.add((top, bottom))
+
+    source_by_id = {entity.id: entity for entity in geometry_entities}
+    cells: dict[tuple[float, float, float, float], Entity] = {}
+    for top, bottom in sorted(bands):
+        walls = tuple(
+            wall
+            for wall in vertical
+            if wall.lo <= top + tolerance and wall.hi >= bottom - tolerance
+        )
+        for left, right in zip(walls, walls[1:], strict=False):
+            width = right.fixed - left.fixed
+            if not (
+                settings.callout_min_frame_cell_width <= width <= settings.callout_max_frame_width
+            ):
+                continue
+            top_owners = _coverage_owners(horizontal, top, left.fixed, right.fixed, tolerance)
+            bottom_owners = _coverage_owners(horizontal, bottom, left.fixed, right.fixed, tolerance)
+            if not top_owners or not bottom_owners:
+                continue
+            owner_ids = tuple(
+                sorted(
+                    set(left.owner_ids)
+                    | set(right.owner_ids)
+                    | set(top_owners)
+                    | set(bottom_owners)
+                )
+            )
+            raw_bbox = (left.fixed, top, right.fixed, bottom)
+            key = tuple(round(value, 7) for value in raw_bbox)
+            bbox = (key[0], key[1], key[2], key[3])
+            style_signature = _digest(
+                *(source_by_id[owner_id].style_signature for owner_id in owner_ids)
+            )
+            shape_signature = _digest("frame-cell", round(width, 6), round(bottom - top, 6))
+            content_signature = _digest("geometry", shape_signature, style_signature)
+            page_index = source_by_id[owner_ids[0]].page_index
+            cell = Entity(
+                id=f"p{page_index + 1}-fc-{_digest(*key, *owner_ids, length=14)}",
+                page_index=page_index,
+                kind=EntityKind.GEOMETRY,
+                bbox=bbox,
+                anchor=((bbox[0] + bbox[2]) / 2.0, (bbox[1] + bbox[3]) / 2.0),
+                content_signature=content_signature,
+                shape_signature=shape_signature,
+                style_signature=style_signature,
+                op_histogram=(("l", 4),),
+                primitive_count=4,
+                path_length=round(2.0 * (width + bottom - top), 6),
+                geometry_segments=(
+                    ((bbox[0], bbox[1]), (bbox[2], bbox[1])),
+                    ((bbox[2], bbox[1]), (bbox[2], bbox[3])),
+                    ((bbox[2], bbox[3]), (bbox[0], bbox[3])),
+                    ((bbox[0], bbox[3]), (bbox[0], bbox[1])),
+                ),
+                callout_member_ids=owner_ids,
+            )
+            previous = cells.get(key)
+            if previous is None or cell.id < previous.id:
+                cells[key] = cell
+    return tuple(sorted(cells.values(), key=lambda entity: (entity.bbox, entity.id)))
+
+
 def _has_internal_frame_divider(entity: Entity, tolerance: float) -> bool:
     """Return whether one compound path visibly contains adjoining cells."""
 
@@ -443,7 +907,15 @@ def _looks_like_gdt_sequence(parts: Iterable[str]) -> bool:
         # material-condition cells. Requiring that topology avoids treating an
         # arbitrary boxed decimal as GD&T.
         suffix = cleaned[tolerance_index + 1 :]
-        if sum(bool(_GDT_DATUM_CELL.fullmatch(value)) for value in suffix) >= 2:
+        allowed_suffix = tuple(
+            bool(_GDT_DATUM_CELL.fullmatch(value))
+            or value in _GDT_MODIFIER_SYMBOLS
+            or bool(_GDT_MODIFIER_WORDS.fullmatch(value))
+            for value in suffix
+        )
+        if sum(bool(_GDT_DATUM_CELL.fullmatch(value)) for value in suffix) >= 2 and all(
+            allowed_suffix
+        ):
             return True
     return False
 
@@ -483,6 +955,41 @@ def _gdt_starts(
             inferred.append(max(0, tolerance_index - 1))
     if inferred:
         return tuple(dict.fromkeys(inferred))
+
+    # Custom CAD fonts frequently outline the feature symbol and place text
+    # very close to a divider. In that case tolerant cell assignment can put a
+    # glyph in two cells. Use the unambiguous left-to-right semantic sequence,
+    # then locate its tolerance in the reconstructed frame topology.
+    ordered_entities = tuple(
+        sorted(contained, key=lambda entity: (entity.centroid[0], entity.bbox[1], entity.id))
+    )
+    if _looks_like_gdt_sequence(entity.text for entity in ordered_entities):
+        for entity in ordered_entities:
+            if not _GDT_TOLERANCE_CELL.fullmatch(_clean(entity.text)):
+                continue
+            containing = [
+                index
+                for index, cell in enumerate(cells)
+                if _bbox_contains(cell.bbox, entity.centroid, 0.0)
+            ]
+            if not containing:
+                containing = [
+                    min(
+                        range(len(cells)),
+                        key=lambda index: (
+                            abs(cells[index].centroid[0] - entity.centroid[0]),
+                            index,
+                        ),
+                    )
+                ]
+            tolerance_index = min(
+                containing,
+                key=lambda index: (
+                    abs(cells[index].centroid[0] - entity.centroid[0]),
+                    index,
+                ),
+            )
+            return (max(0, tolerance_index - 1),)
 
     # One PDF path may contain every cell, leaving only one aggregate bbox.
     # Multiple rectangle/line primitives plus tolerance→datum text order still
@@ -572,7 +1079,7 @@ def _composite_callout(
         ),
         callout_category=category,
         callout_structure=structure,
-        callout_member_ids=tuple(entity.id for entity in members),
+        callout_member_ids=_flatten_member_ids(members),
         callout_attachment_points=attachments,
     )
 
@@ -582,13 +1089,19 @@ def _gdt_groups(
     geometry_entities: tuple[Entity, ...],
     settings: ComparisonSettings,
 ) -> tuple[tuple[Entity, tuple[str, ...]], ...]:
-    rectangles = tuple(
+    explicit_rectangles = tuple(
         entity
         for entity in geometry_entities
         if _is_rectangle(entity)
         and entity.height <= settings.callout_max_frame_height
         and entity.width <= settings.callout_max_frame_width
     )
+    explicit_ids = frozenset(entity.id for entity in explicit_rectangles)
+    inferred_cells = _frame_cells_from_segments(
+        tuple(entity for entity in geometry_entities if entity.id not in explicit_ids),
+        settings,
+    )
+    rectangles = (*explicit_rectangles, *inferred_cells)
     framed_text_ids = frozenset(
         text.id
         for text in text_entities
@@ -630,6 +1143,8 @@ def _gdt_groups(
         for position, start in enumerate(starts):
             stop = starts[position + 1] if position + 1 < len(starts) else len(cells)
             group_frames = tuple(cells[start:stop])
+            if len(group_frames) > settings.callout_max_frame_cells:
+                continue
             group_bbox = _bbox_union(group_frames)
             if group_bbox[2] - group_bbox[0] > settings.callout_max_frame_width:
                 continue
@@ -644,18 +1159,35 @@ def _gdt_groups(
                 if entity.id not in used_text
                 and _bbox_contains(group_bbox, entity.centroid, tolerance)
             )
-            ordered_cells: list[str] = []
-            for cell in group_frames:
-                cell_text = _cell_text(cell, group_text, tolerance)
-                if cell_text:
-                    ordered_cells.append(cell_text)
-            combined = " | ".join(ordered_cells)
+            frame_source_ids = frozenset(_flatten_member_ids(group_frames))
+            if not frame_source_ids:
+                continue
+            enclosed_geometry = tuple(
+                entity
+                for entity in geometry_entities
+                if entity.id not in used_geometry
+                and entity.id not in frame_source_ids
+                and _bbox_contains_bbox(group_bbox, entity.bbox, tolerance)
+            )
+            ordered_cells = [
+                cell_text
+                for cell in group_frames
+                if (cell_text := _cell_text(cell, group_text, tolerance))
+            ]
+            ordered_group_text = tuple(
+                sorted(
+                    group_text,
+                    key=lambda entity: (entity.centroid[0], entity.bbox[1], entity.id),
+                )
+            )
+            combined = " | ".join(_clean(entity.text) for entity in ordered_group_text)
             # Some CAD exporters emit the entire feature-control frame as one
             # compound path instead of one path per cell. Strong GD&T grammar
             # plus containment is sufficient in that representation.
             if not (
                 _valid_gdt_text(combined)
                 or _looks_like_gdt_sequence(ordered_cells)
+                or _looks_like_gdt_sequence(entity.text for entity in ordered_group_text)
                 or (
                     len(group_frames) == 1
                     and _has_internal_frame_divider(group_frames[0], tolerance)
@@ -669,18 +1201,23 @@ def _gdt_groups(
                 )
             ):
                 continue
-            enclosed_geometry = tuple(
-                entity
-                for entity in geometry_entities
-                if entity.id not in used_geometry
-                and entity not in group_frames
-                and _bbox_contains_bbox(group_bbox, entity.bbox, tolerance)
+            has_text_feature = any(_has_gdt_marker(entity.text) for entity in group_text)
+            has_vector_feature = any(
+                not _is_rectangle(entity)
+                and _bbox_contains_bbox(group_frames[0].bbox, entity.bbox, tolerance)
+                for entity in enclosed_geometry
             )
+            if not has_text_feature and not has_vector_feature:
+                continue
             group_geometry = (*group_frames, *enclosed_geometry)
             attachments = _attachment_points(
                 group_bbox,
                 max((_height(entity) for entity in group_text), default=0.01),
-                (entity for entity in geometry_entities if entity not in group_geometry),
+                (
+                    entity
+                    for entity in geometry_entities
+                    if entity.id not in frame_source_ids and entity not in enclosed_geometry
+                ),
                 settings,
             )
             composite = _composite_callout(
@@ -691,10 +1228,11 @@ def _gdt_groups(
                 combined,
                 attachments,
             )
-            member_ids = tuple(entity.id for entity in (*group_text, *group_geometry))
+            member_ids = _flatten_member_ids((*group_text, *group_geometry))
             output.append((composite, member_ids))
-            used_text.update(entity.id for entity in group_text)
-            used_geometry.update(entity.id for entity in group_geometry)
+            used_text.update(_flatten_member_ids(group_text))
+            used_geometry.update(frame_source_ids)
+            used_geometry.update(_flatten_member_ids(enclosed_geometry))
 
     # Frameless but explicit feature-control text remains safe to reconstruct.
     ordered_text = tuple(sorted(text_entities, key=lambda entity: (entity.bbox[0], entity.id)))
@@ -738,7 +1276,7 @@ def _gdt_groups(
             row.append(candidate)
             current = candidate
         text = " | ".join(_clean(entity.text) for entity in row)
-        if not _valid_gdt_text(text):
+        if not _valid_gdt_text(text) or not _looks_like_gdt_sequence(entity.text for entity in row):
             continue
         bbox = _bbox_union(row)
         attachments = _attachment_points(
@@ -755,7 +1293,7 @@ def _gdt_groups(
             text,
             attachments,
         )
-        member_ids = tuple(entity.id for entity in row)
+        member_ids = _flatten_member_ids(row)
         output.append((composite, member_ids))
         used_text.update(member_ids)
 
@@ -768,10 +1306,15 @@ def _dimension_groups(
     excluded_ids: frozenset[str],
     settings: ComparisonSettings,
 ) -> tuple[tuple[Entity, tuple[str, ...]], ...]:
+    fragments = _signed_tolerance_fragments(
+        (entity for entity in text_entities if excluded_ids.isdisjoint(_leaf_member_ids(entity))),
+        settings,
+    )
     candidates = tuple(
         entity
-        for entity in text_entities
-        if entity.id not in excluded_ids and _fragment_role(entity.text) not in {"other", "gdt"}
+        for entity in fragments
+        if excluded_ids.isdisjoint(_leaf_member_ids(entity))
+        and _fragment_role(entity.text) not in {"other", "gdt"}
     )
     edges: dict[str, set[str]] = defaultdict(set)
     for index, first in enumerate(candidates):
@@ -836,7 +1379,7 @@ def _dimension_groups(
         output.append(
             (
                 composite,
-                tuple(entity.id for entity in (*component, *enclosed_symbols)),
+                _flatten_member_ids((*component, *enclosed_symbols)),
             )
         )
     return tuple(output)
@@ -855,14 +1398,20 @@ def reconstruct_callouts(
 
     raw = tuple(entities)
     text_entities = tuple(entity for entity in raw if entity.kind == EntityKind.TEXT)
-    geometry_entities = tuple(entity for entity in raw if entity.kind == EntityKind.GEOMETRY)
+    original_geometry = tuple(entity for entity in raw if entity.kind == EntityKind.GEOMETRY)
+    geometry_entities, children_by_parent = _local_geometry_entities(
+        original_geometry,
+        settings,
+    )
 
     grouped: list[Entity] = []
     consumed: set[str] = set()
     for composite, member_ids in _gdt_groups(text_entities, geometry_entities, settings):
-        if consumed.isdisjoint(member_ids):
-            grouped.append(composite)
-            consumed.update(member_ids)
+        # A CAD exporter may use one continuous rail entity for two touching
+        # frames. _gdt_groups owns text/vector members uniquely but permits that
+        # shared frame source to support both semantic composites.
+        grouped.append(composite)
+        consumed.update(member_ids)
     for composite, member_ids in _dimension_groups(
         text_entities,
         geometry_entities,
@@ -873,6 +1422,13 @@ def reconstruct_callouts(
             grouped.append(composite)
             consumed.update(member_ids)
 
-    output = [entity for entity in raw if entity.id not in consumed]
+    output = [entity for entity in text_entities if entity.id not in consumed]
+    for parent in original_geometry:
+        children = children_by_parent[parent.id]
+        remaining = tuple(child for child in children if child.id not in consumed)
+        if len(remaining) == len(children):
+            output.append(parent)
+        elif remaining:
+            output.append(_geometry_residual_entity(parent, remaining))
     output.extend(grouped)
     return tuple(sorted(output, key=lambda entity: (entity.kind.value, entity.bbox, entity.id)))

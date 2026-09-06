@@ -59,6 +59,11 @@ changes, the dimension or GD&T frame produces one table row and its entire union
 box blinks in the viewer. Repeated callouts use unambiguous leader/feature
 attachment points during matching; materially tied candidates remain separate
 additions/removals instead of becoming a potentially false modification.
+Standalone tolerance signs emitted by CAD exporters are paired with their
+numeric spans only when baseline, direction, reading order, and ambiguity checks
+agree. GD&T cells can also be rebuilt from connected horizontal and vertical
+line segments when one exporter drawing record contains several disconnected
+objects; unrelated residual geometry remains available to normal matching.
 
 ## Install and run
 
@@ -154,6 +159,9 @@ The reconstruction thresholds live with the other analysis settings in
 values control normalized candidate limits, while the attachment and ambiguity
 settings control how conservatively repeated callouts may pair. They should be
 calibrated against labeled project drawings before being loosened.
+`callout_segment_connect_tolerance` is deliberately much tighter than frame
+containment and should only absorb PDF coordinate noise. The frame height,
+cell-width, total-width, and cell-count limits bound topology reconstruction.
 
 Dimensions, GD&T, and changed geometry are relevant by default. Notes require a
 configured inspection keyword. Plain revision letters, dates, and approval
@@ -204,8 +212,9 @@ interpretation guidance.
   spatially tiny; the coverage and content thresholds are configurable in
   `ComparisonSettings`. By default, imagery covering at least 85% of a page
   requires more than five visible entities and more than 2% structured coverage.
-- Entity granularity depends on how the originating CAD software grouped paths
-  in its PDF display list.
+- Entity granularity still depends partly on how the originating CAD software
+  grouped paths in its PDF display list. Disconnected straight-line batches are
+  split locally for GD&T topology, but ambiguous or curved batches are preserved.
 - Fully transparent and all-white drawing paths are treated as non-visible CAD
   export masks, so they do not create false added-geometry rows.
 - Custom symbol fonts may expose replacement/private-use characters. Known GD&T

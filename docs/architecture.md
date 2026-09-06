@@ -61,11 +61,18 @@ only fragments that are clearly part of one mechanical annotation. The rules
 are intentionally conservative:
 
 - dimensions are rebuilt when inline grammar or stacked tolerance structure
-  makes the relationship explicit;
+  makes the relationship explicit. Standalone `+` and `-` glyphs are paired
+  with a numeric tolerance only when their baseline, writing direction, reading
+  order, font-relative gap, and nearest-candidate margin agree;
 - GD&T is rebuilt from adjoining frame topology and contained semantic cells,
   or from an explicit GD&T marker sequence. A vector/custom-font symbol can be
   inferred only when a compound frame has a tolerance followed by multiple
   datum/material-condition cells;
+- when an exporter batches unrelated lines into one drawing record, disconnected
+  straight-line components are assigned stable local IDs. Collinear coverage is
+  merged within a tight coordinate-noise tolerance, and virtual cells require
+  two continuous rails plus two walls. Cell geometry alone is insufficient:
+  contained text must still pass GD&T sequence grammar;
 - proximity only narrows the candidate set and never authorizes grouping;
 - closed rectangular paths cannot become leader evidence, and a leader endpoint
   is retained only when its ownership is unambiguous among candidate callouts;
@@ -77,6 +84,9 @@ Composite entities retain member IDs, structure labels, and attachment points.
 That traceability lets comparison and reporting treat the whole union as one
 logical change while still exposing the original fragments in the output.
 Matching never compares a composite member again in the global raw-entity pool.
+If only some local components of a batched drawing record are consumed, its
+unconsumed components remain as residual geometry; if none are consumed, the
+original entity is returned unchanged.
 If any composite member changes, comparison emits one modified row whose box is
 the complete callout union; additions and removals likewise emit one row.
 
