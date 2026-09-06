@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import tomllib
 from collections import Counter
 from pathlib import Path
 
@@ -25,11 +26,17 @@ def test_committed_sample_exercises_every_requested_parser_branch():
     assert not revision.inspection_relevant
 
 
-def test_source_has_no_ocr_image_comparison_or_pytorch_dependencies():
+def test_production_has_no_image_ocr_pytorch_or_scipy_dependencies():
     root = Path(__file__).resolve().parents[1]
-    manifest = (root / "pyproject.toml").read_text(encoding="utf-8").casefold()
+    manifest = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
     prohibited_dependencies = ("pytesseract", "tesseract", "torch", "opencv", "scikit-image")
-    assert not any(dependency in manifest for dependency in prohibited_dependencies)
+    core_dependencies = " ".join(manifest["project"]["dependencies"]).casefold()
+    assert not any(dependency in core_dependencies for dependency in prohibited_dependencies)
+    assert "scipy" not in core_dependencies
+    benchmark_extra = " ".join(
+        manifest["project"].get("optional-dependencies", {}).get("benchmark", [])
+    )
+    assert "scipy" in benchmark_extra.casefold()
 
     analysis_modules = [
         root / "src" / "pdf_differences" / name
@@ -38,6 +45,7 @@ def test_source_has_no_ocr_image_comparison_or_pytorch_dependencies():
             "comparison.py",
             "extraction.py",
             "matching.py",
+            "matching_algorithms.py",
             "mechanical.py",
         )
     ]
@@ -51,4 +59,4 @@ def test_source_has_no_ocr_image_comparison_or_pytorch_dependencies():
                 imported_roots.update(alias.name.split(".", 1)[0] for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported_roots.add(node.module.split(".", 1)[0])
-    assert imported_roots.isdisjoint({"cv2", "pytesseract", "torch", "torch_geometric"})
+    assert imported_roots.isdisjoint({"cv2", "pytesseract", "scipy", "torch", "torch_geometric"})

@@ -1,4 +1,4 @@
-"""Three-tier entity matching with no neural-network or PyTorch dependency.
+"""Three-tier entity matching with no neural-network, PyTorch, or SciPy dependency.
 
 The cascade adopts CADMorph's conceptual ordering—exact, attribute, then
 ambiguous assignment—but implements the final tier with deterministic,
@@ -13,13 +13,10 @@ from collections.abc import Iterable
 from difflib import SequenceMatcher
 
 import numpy as np
-from scipy.optimize import linear_sum_assignment
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import min_weight_full_bipartite_matching
-from scipy.spatial import cKDTree
 
 from pdf_differences.alignment import registered_distance, transform_bbox, transform_point
 from pdf_differences.config import SETTINGS, ComparisonSettings
+from pdf_differences.matching_algorithms import NATIVE_MATCHING_BACKEND, MatchingBackend
 from pdf_differences.mechanical import classify_text
 from pdf_differences.models import (
     BBox,
@@ -70,7 +67,10 @@ def _aspect(entity: Entity) -> float:
     return min(1_000.0, entity.width / entity.height)
 
 
-def _context_vectors(entities: tuple[Entity, ...]) -> dict[str, tuple[float, ...]]:
+def _context_vectors(
+    entities: tuple[Entity, ...],
+    backend: MatchingBackend = NATIVE_MATCHING_BACKEND,
+) -> dict[str, tuple[float, ...]]:
     """Summarize each entity's six nearest neighbors without learned embeddings."""
 
     if not entities:
@@ -78,16 +78,17 @@ def _context_vectors(entities: tuple[Entity, ...]) -> dict[str, tuple[float, ...
     if len(entities) == 1:
         return {entities[0].id: (0.0, 0.0, 0.0, 0.0)}
     points = np.asarray([entity.anchor for entity in entities], dtype=np.float64)
-    tree = cKDTree(points)
     count = min(7, len(entities))
-    distances, indices = tree.query(points, k=count)
-    if count == 1:
-        distances = distances[:, None]
-        indices = indices[:, None]
+    distances, indices = backend.nearest_neighbors(points, count)
     output: dict[str, tuple[float, ...]] = {}
     for row, entity in enumerate(entities):
-        neighbor_indices = [int(index) for index in indices[row][1:]]
-        neighbor_distances = [float(value) for value in distances[row][1:]]
+        neighbors = [
+            (int(index), float(distance))
+            for index, distance in zip(indices[row], distances[row], strict=True)
+            if int(index) != row
+        ][:6]
+        neighbor_indices = [index for index, _ in neighbors]
+        neighbor_distances = [distance for _, distance in neighbors]
         divisor = max(1, len(neighbor_indices))
         text_share = (
             sum(entities[index].kind == EntityKind.TEXT for index in neighbor_indices) / divisor
@@ -248,6 +249,7 @@ def _hungarian_assign(
     new: tuple[Entity, ...],
     minimum: float,
     settings: ComparisonSettings,
+    backend: MatchingBackend = NATIVE_MATCHING_BACKEND,
 ) -> tuple[list[EntityMatch], set[int], set[int]]:
     matches: list[EntityMatch] = []
     used_old: set[int] = set()
@@ -263,33 +265,15 @@ def _hungarian_assign(
                 continue
             row, column = old_position[old_index], new_position[new_index]
             tie_break = (row * max(1, len(new_nodes)) + column) * 1e-12
-            # Sparse graph routines treat stored zeroes as missing edges.
             component_candidates.append((row, column, max(1e-12, 1.0 - score + tie_break)))
 
-        if max(len(old_nodes), len(new_nodes)) > settings.sparse_assignment_threshold:
-            matrix_rows = [item[0] for item in component_candidates]
-            matrix_columns = [item[1] for item in component_candidates]
-            matrix_values = [item[2] for item in component_candidates]
-            for row in range(len(old_nodes)):
-                matrix_rows.append(row)
-                matrix_columns.append(len(new_nodes) + row)
-                matrix_values.append(unmatched_cost)
-            sparse_cost = coo_matrix(
-                (matrix_values, (matrix_rows, matrix_columns)),
-                shape=(len(old_nodes), len(new_nodes) + len(old_nodes)),
-            ).tocsr()
-            rows, columns = min_weight_full_bipartite_matching(sparse_cost)
-        else:
-            cost = np.full(
-                (len(old_nodes), len(new_nodes) + len(old_nodes)),
-                2.0,
-                dtype=np.float64,
-            )
-            for row in range(len(old_nodes)):
-                cost[row, len(new_nodes) + row] = unmatched_cost
-            for row, column, value in component_candidates:
-                cost[row, column] = value
-            rows, columns = linear_sum_assignment(cost)
+        rows, columns = backend.assign_component(
+            len(old_nodes),
+            len(new_nodes),
+            component_candidates,
+            unmatched_cost,
+            settings.sparse_assignment_threshold,
+        )
 
         for row, column in zip(rows, columns, strict=True):
             if column >= len(new_nodes):
@@ -318,15 +302,19 @@ def _spatial_candidates(
     new: tuple[Entity, ...],
     transform: Transform,
     radius: float,
+    backend: MatchingBackend = NATIVE_MATCHING_BACKEND,
 ) -> Iterable[tuple[int, int, float]]:
     if not old or not new:
         return ()
     new_points = np.asarray([entity.anchor for entity in new], dtype=np.float64)
-    tree = cKDTree(new_points)
+    old_points = np.asarray(
+        [transform_point(entity.anchor, transform) for entity in old], dtype=np.float64
+    )
+    neighbors = backend.radius_neighbors(new_points, old_points, radius)
     output: list[tuple[int, int, float]] = []
     for old_index, entity in enumerate(old):
-        point = transform_point(entity.anchor, transform)
-        for new_index in sorted(tree.query_ball_point(point, radius)):
+        point = old_points[old_index]
+        for new_index in neighbors[old_index]:
             candidate = new[int(new_index)]
             if entity.kind != candidate.kind:
                 continue
@@ -339,6 +327,8 @@ def match_entities(
     new_entities: Iterable[Entity],
     transform: Transform | None = None,
     settings: ComparisonSettings = SETTINGS,
+    *,
+    backend: MatchingBackend = NATIVE_MATCHING_BACKEND,
 ) -> MatchResult:
     """Match two page inventories using exact, attribute, and structural tiers."""
 
@@ -374,7 +364,11 @@ def match_entities(
     # Tier 2: deterministic in-place attribute/geometry edits.
     attribute_candidates: list[tuple[float, float, int, int]] = []
     for old_index, new_index, distance in _spatial_candidates(
-        rem_old, rem_new, transform, settings.attribute_position_tolerance
+        rem_old,
+        rem_new,
+        transform,
+        settings.attribute_position_tolerance,
+        backend,
     ):
         score = attribute_score(
             rem_old[old_index], rem_new[new_index], transform, old, new, settings
@@ -391,31 +385,40 @@ def match_entities(
     rem2_old = tuple(rem_old[index] for index in rem2_old_indices)
     rem2_new = tuple(rem_new[index] for index in rem2_new_indices)
 
-    # Tier 3: ambiguous/moved entities, globally assigned within sparse components.
-    old_context = _context_vectors(old)
-    new_context = _context_vectors(new)
+    # Tier 3: ambiguous/moved entities, globally assigned within connected components.
     structural_candidates: dict[tuple[int, int], tuple[float, float]] = {}
-    for old_index, new_index, distance in _spatial_candidates(
-        rem2_old, rem2_new, transform, settings.structural_search_radius
-    ):
-        score = structural_score(
-            rem2_old[old_index],
-            rem2_new[new_index],
-            distance,
-            old_context,
-            new_context,
-            old,
-            new,
-            settings,
+    nearby_structural = tuple(
+        _spatial_candidates(
+            rem2_old,
+            rem2_new,
+            transform,
+            settings.structural_search_radius,
+            backend,
         )
-        if score >= settings.structural_min_score:
-            structural_candidates[(old_index, new_index)] = (score, distance)
+    )
+    if nearby_structural:
+        old_context = _context_vectors(old, backend)
+        new_context = _context_vectors(new, backend)
+        for old_index, new_index, distance in nearby_structural:
+            score = structural_score(
+                rem2_old[old_index],
+                rem2_new[new_index],
+                distance,
+                old_context,
+                new_context,
+                old,
+                new,
+                settings,
+            )
+            if score >= settings.structural_min_score:
+                structural_candidates[(old_index, new_index)] = (score, distance)
     assigned, structural_old, structural_new = _hungarian_assign(
         structural_candidates,
         rem2_old,
         rem2_new,
         settings.structural_min_score,
         settings,
+        backend,
     )
     all_matches.extend(assigned)
 

@@ -10,6 +10,7 @@ It deliberately has:
 - no image or pixel comparison;
 - no OCR or Tesseract fallback;
 - no PyTorch or learned model;
+- no SciPy runtime dependency;
 - no web server or browser frontend.
 
 The desktop interface is built with PyQt6. PyMuPDF rasterizes pages only after
@@ -105,10 +106,11 @@ Regenerate it with `python tools/generate_sample.py`.
    shape, style, bounding-box overlap, and size. This captures dimension-value,
    note, style, and local geometry edits.
 3. **Structural** — remaining nearby candidates are scored from handcrafted
-   shape/text/context features, then assigned one-to-one with a global minimum-
-   cost bipartite solver (dense Hungarian for small groups, sparse for large
-   groups). A search-radius gate prevents distant lookalikes from becoming false
-   moves.
+   shape/text/context features, then assigned one-to-one with deterministic
+   minimum-cost assignment. Small components use a NumPy-backed Hungarian
+   solver; unusually large components use bounded-memory Python min-cost flow.
+   A spatial hash enforces the search-radius gate that prevents distant
+   lookalikes from becoming false moves.
 
 Alignment uses unique unchanged text and geometry signatures to estimate a
 translation/rotation/uniform-scale transform. Comparisons are declined when a
@@ -142,14 +144,33 @@ describes a technical inspection impact. See
 ```powershell
 python -m pip install -e ".[dev]"
 pytest
-ruff check src tests tools
-ruff format --check src tests tools
+ruff check src tests tools benchmarks
+ruff format --check src tests tools benchmarks
 ```
 
 The test suite covers raster rejection, extraction determinism, similarity
 alignment, all three matching tiers, moved-versus-added/removed behavior,
 mechanical categories, inspection relevance, multi-page additions, exports, and
 an end-to-end vector drawing pair.
+
+### SciPy reference benchmark
+
+The former SciPy primitives remain available outside the application as an
+optional benchmark oracle. This compares native and SciPy matching time, entity
+pairing, unmatched entities, and the final detected-change records. Extraction
+and alignment run once outside the timer, so the reported time isolates matching.
+
+```powershell
+python -m pip install -e ".[dev,benchmark]"
+python -m benchmarks.compare_scipy --repeat 7
+python -m benchmarks.compare_scipy --repeat 7 `
+  --pair drawing old.pdf new.pdf `
+  --pair second-drawing older.pdf newer.pdf
+```
+
+The command exits unsuccessfully if either matching or detected-change output
+differs. See [benchmarks/README.md](benchmarks/README.md) for the JSON mode and
+interpretation guidance.
 
 ## Scope and limitations
 
