@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pymupdf as fitz
-from helpers import make_drawing_pdf, make_text_layer_over_image_pdf
+from helpers import make_drawing_pdf, make_image_dominant_pdf
 
 from pdf_differences.comparison import compare_pdfs
 from pdf_differences.models import ChangeCategory, ChangeType, Transform
@@ -89,8 +89,23 @@ def test_extra_page_entities_are_reported_as_added(tmp_path):
 
 
 def test_embedded_images_are_ignored_with_an_explicit_note(tmp_path):
-    old = make_text_layer_over_image_pdf(tmp_path / "old.pdf")
-    new = make_text_layer_over_image_pdf(tmp_path / "new.pdf")
+    overlay_rects = ((25, 25, 115, 85), (150, 40, 250, 125))
+    overlay_texts = (
+        (34, 52, "REV A", 11),
+        (34, 70, "APPROVED", 11),
+        (160, 68, "BOM NOTE", 11),
+        (160, 95, "CHECK DIMENSIONS", 11),
+    )
+    old = make_image_dominant_pdf(
+        tmp_path / "old.pdf",
+        overlay_rects=overlay_rects,
+        overlay_texts=overlay_texts,
+    )
+    new = make_image_dominant_pdf(
+        tmp_path / "new.pdf",
+        overlay_rects=overlay_rects,
+        overlay_texts=overlay_texts,
+    )
     result = compare_pdfs(old, new)
     assert result.changes == ()
     assert any("image comparison is disabled" in note for note in result.pages[0].notes)

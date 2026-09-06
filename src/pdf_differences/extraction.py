@@ -204,7 +204,8 @@ def _text_entities(page: fitz.Page, page_index: int) -> Iterable[Entity]:
         for line in block.get("lines", []):
             for span in line.get("spans", []):
                 text = normalize_text(span.get("text") or "")
-                if not text:
+                alpha = span.get("alpha")
+                if not text or (alpha is not None and int(alpha) <= 0):
                     continue
                 bbox = _norm_bbox(span["bbox"], width, height)
                 origin = span.get("origin")

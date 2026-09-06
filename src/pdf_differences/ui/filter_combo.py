@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Any
 
-from PyQt6.QtCore import QEvent, QModelIndex, QSignalBlocker, Qt, pyqtSignal
+from PyQt6.QtCore import QEvent, QModelIndex, Qt, pyqtSignal
 from PyQt6.QtGui import QStandardItem, QStandardItemModel
 from PyQt6.QtWidgets import QComboBox, QListView
 
@@ -46,6 +46,7 @@ class MultiSelectComboBox(QComboBox):
         view.viewport().installEventFilter(self)
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
+        self._bulk_updating = False
         self._model.itemChanged.connect(self._item_changed)
 
         self._append_action(self._SELECT_ALL)
@@ -102,6 +103,8 @@ class MultiSelectComboBox(QComboBox):
 
     def _item_changed(self, item: QStandardItem) -> None:
         if item.row() >= 2:
+            if self._bulk_updating:
+                return
             self._refresh_summary()
             self.selectionChanged.emit()
 
@@ -133,12 +136,16 @@ class MultiSelectComboBox(QComboBox):
         self._set_all(Qt.CheckState.Unchecked)
 
     def _set_all(self, state: Qt.CheckState) -> None:
-        changed = any(item.checkState() != state for item in self._option_items())
+        options = self._option_items()
+        changed = any(item.checkState() != state for item in options)
         if not changed:
             return
-        with QSignalBlocker(self._model):
-            for item in self._option_items():
+        self._bulk_updating = True
+        try:
+            for item in options:
                 item.setCheckState(state)
+        finally:
+            self._bulk_updating = False
         self._refresh_summary()
         self.selectionChanged.emit()
 
@@ -153,9 +160,12 @@ class MultiSelectComboBox(QComboBox):
         )
         if unchanged:
             return
-        with QSignalBlocker(self._model):
+        self._bulk_updating = True
+        try:
             for item, state in zip(options, states, strict=True):
                 item.setCheckState(Qt.CheckState.Checked if state else Qt.CheckState.Unchecked)
+        finally:
+            self._bulk_updating = False
         self._refresh_summary()
         self.selectionChanged.emit()
 

@@ -14,9 +14,13 @@ rendered pixels               -X-> analysis
 `get_pixmap()` for a disposable human preview. No function in extraction,
 alignment, matching, mechanical parsing, or comparison accepts image data.
 
-Raster-only pages are rejected in `validation.py`. A searchable, text-only page
+Raster-dominant pages are rejected in `validation.py`: if a near-full-page
+embedded image is paired with structured content that is sparse or spatially
+tiny, the page is treated as effectively scanned. A searchable, text-only page
 is accepted with an explicit warning because its text entities are still exact;
-geometry changes on that page cannot be observed.
+geometry changes on that page cannot be observed. The default dominance,
+entity-count, and structured-coverage thresholds are 85%, five, and 2%, and all
+three are configurable in `ComparisonSettings`.
 
 ## Components
 

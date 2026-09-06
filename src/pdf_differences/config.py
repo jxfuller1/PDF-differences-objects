@@ -37,6 +37,13 @@ class ComparisonSettings:
     title_block_y_min: float = 0.76
     preview_dpi: int = 125
 
+    # Validation heuristic for effectively scanned pages. A page is rejected
+    # when one embedded image dominates the page area and the remaining
+    # structured content is sparse or occupies too little of the page.
+    scanned_page_min_image_coverage: float = 0.85
+    scanned_page_max_structured_entities: int = 5
+    scanned_page_max_structured_coverage: float = 0.02
+
 
 SETTINGS = ComparisonSettings()
 

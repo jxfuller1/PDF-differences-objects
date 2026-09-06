@@ -41,3 +41,19 @@ def test_ignores_white_background_mask_geometry(tmp_path):
     geometry = [entity for entity in entities if entity.kind == EntityKind.GEOMETRY]
     assert len(geometry) == 1
     assert geometry[0].op_histogram == (("l", 1),)
+
+
+def test_ignores_invisible_text_spans(tmp_path):
+    path = tmp_path / "hidden-text.pdf"
+    document = fitz.open()
+    page = document.new_page(width=300, height=200)
+    page.insert_text(fitz.Point(30, 40), "VISIBLE NOTE", fontsize=10)
+    page.insert_text(fitz.Point(30, 70), "HIDDEN OCR", fontsize=10, render_mode=3)
+    document.save(path)
+    document.close()
+
+    with fitz.open(path) as reopened:
+        entities = extract_page_entities(reopened[0], 0)
+
+    text = [entity.text for entity in entities if entity.kind == EntityKind.TEXT]
+    assert text == ["VISIBLE NOTE"]

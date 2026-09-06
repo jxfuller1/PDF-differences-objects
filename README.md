@@ -155,7 +155,11 @@ an end-to-end vector drawing pair.
 
 - Pages are paired by index; page reordering is not inferred.
 - Text-only pages are accepted, but the report explicitly states that geometry
-  was unavailable. Raster-only pages are rejected.
+  was unavailable. Raster-only pages are rejected. Pages dominated by embedded
+  imagery are also rejected when their visible vector/text layer is sparse or
+  spatially tiny; the coverage and content thresholds are configurable in
+  `ComparisonSettings`. By default, imagery covering at least 85% of a page
+  requires more than five visible entities and more than 2% structured coverage.
 - Entity granularity depends on how the originating CAD software grouped paths
   in its PDF display list.
 - Fully transparent and all-white drawing paths are treated as non-visible CAD
