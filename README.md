@@ -63,6 +63,11 @@ Standalone tolerance signs emitted by CAD exporters are paired with their
 numeric spans only when baseline, direction, reading order, and ambiguity checks
 agree. Each nominal or complete dimension core owns a separate hypothesis and
 can claim at most one mutually best tolerance stack; tied ownership stays raw.
+Unsigned upper/lower limit values are grouped only when their precision, size,
+vertical layout, and one mutually owned feature prefix agree. A custom-font
+feature prefix must also be a textless, compact many-segment vector glyph
+immediately before the dimension; simple arrowheads, text-bearing revision
+bubbles, and ambiguous shared glyphs stay raw.
 GD&T cells are rebuilt from one topology containing both explicit rectangles
 and connected horizontal/vertical segments, even when an exporter splits one
 frame across drawing records. A one-datum vector-symbol frame is accepted only
@@ -131,7 +136,11 @@ Regenerate it with `python tools/generate_sample.py`.
    minimum-cost assignment. Small components use a NumPy-backed Hungarian
    solver; unusually large components use bounded-memory Python min-cost flow.
    A spatial hash enforces the search-radius gate that prevents distant
-   lookalikes from becoming false moves.
+   lookalikes from becoming false moves. A raw dimension fragment whose value
+   and location both changed is not structurally paired without reconstructed
+   callout evidence. Detached textless compact vector glyphs likewise require
+   an exact or in-place match, preventing repeated diameter and datum marks
+   from being cross-matched between unrelated callouts.
 
 Alignment uses unique unchanged text and geometry signatures to estimate a
 translation/rotation/uniform-scale transform. Comparisons are declined when a
@@ -167,6 +176,9 @@ calibrated against labeled project drawings before being loosened.
 `callout_segment_connect_tolerance` is deliberately much tighter than frame
 containment and should only absorb PDF coordinate noise. The frame height,
 cell-width, total-width, and cell-count limits bound topology reconstruction.
+`callout_limit_width_ratio` gates unsigned limit pairs, while the
+`structural_glyph_*` values define compact line-built CAD-font glyphs for both
+prefix ownership and conservative loose-match rejection.
 
 Dimensions, GD&T, and changed geometry are relevant by default. Notes require a
 configured inspection keyword. Plain revision letters, dates, and approval

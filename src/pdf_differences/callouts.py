@@ -170,6 +170,7 @@ def _dimension_profile(
     *,
     has_attachment: bool,
     member_count: int = 1,
+    allow_unsigned_stack: bool = False,
 ) -> str | None:
     cleaned = _clean(text)
     upper = cleaned.upper()
@@ -194,12 +195,27 @@ def _dimension_profile(
     material_without_roles = re.sub(rf"(?:±|\+/-|[+\-])\s*{_NUMBER}", " ", material_without_roles)
     unsigned_numbers = _NUMBER_SEARCH.findall(material_without_roles)
     if len(features) > 1 or len(unsigned_numbers) > 1:
-        return None
+        if not (
+            allow_unsigned_stack
+            and len(features) in {0, 1}
+            and len(unsigned_numbers) == 2
+            and member_count >= 2
+            and not quantities
+            and not signed_tolerances
+            and not qualifiers
+            and not units
+        ):
+            return None
     if not unsigned_numbers:
         return None
 
     semantic_roles = bool(quantities or features or signed_tolerances or qualifiers)
-    strong = semantic_roles or bool(units and member_count > 1) or has_attachment
+    strong = (
+        semantic_roles
+        or bool(units and member_count > 1)
+        or has_attachment
+        or (allow_unsigned_stack and len(unsigned_numbers) == 2)
+    )
     if not strong and not has_attachment:
         return None
     if "Ø" in cleaned or "⌀" in cleaned or re.search(r"\bDIA\.?", upper):
@@ -212,7 +228,8 @@ def _dimension_profile(
         family = "angular"
     else:
         family = "linear"
-    return f"dimension:{family}"
+    layout = ":limit" if allow_unsigned_stack else ""
+    return f"dimension:{family}{layout}"
 
 
 _INLINE_TRANSITIONS = {
@@ -1649,6 +1666,296 @@ def _attach_dimension_suffixes(
     return tuple((root, (*members, *additions.get(root.id, ()))) for root, members in hypotheses)
 
 
+def _numeric_precision(entity: Entity) -> int:
+    match = re.search(r"[.,](\d+)", _clean(entity.text))
+    return len(match.group(1)) if match else 0
+
+
+def _unsigned_limit_pair_score(
+    first: Entity,
+    second: Entity,
+    settings: ComparisonSettings,
+) -> float | None:
+    """Score the two numeric rows of an upper/lower limit dimension."""
+
+    if not _same_direction(first, second) or _numeric_precision(first) != _numeric_precision(
+        second
+    ):
+        return None
+    scale = max(_height(first), _height(second))
+    height_ratio = min(_height(first), _height(second)) / scale
+    width_ratio = min(first.width, second.width) / max(first.width, second.width, 1e-9)
+    alignment = abs(first.bbox[0] - second.bbox[0])
+    separation = abs(first.anchor[1] - second.anchor[1])
+    if (
+        height_ratio < settings.callout_limit_width_ratio
+        or width_ratio < settings.callout_limit_width_ratio
+        or alignment > settings.callout_tolerance_pair_alignment_factor * scale
+        or separation <= settings.callout_baseline_tolerance_factor * scale
+        or separation > settings.callout_stacked_gap_factor * scale
+    ):
+        return None
+    return alignment / scale + (1.0 - width_ratio) + (1.0 - height_ratio)
+
+
+def _text_feature_prefix_score(feature: Entity, target: BBox, scale: float) -> float | None:
+    if _fragment_role(feature.text) != "feature":
+        return None
+    gap = max(0.0, target[0] - feature.bbox[2])
+    center_delta = abs(feature.centroid[1] - 0.5 * (target[1] + target[3]))
+    if (
+        feature.bbox[0] > target[0]
+        or feature.bbox[2] > target[0] + 0.15 * scale
+        or gap > 0.75 * scale
+        or center_delta > 0.75 * scale
+        or _height(feature) < 0.5 * scale
+    ):
+        return None
+    return (gap + center_delta) / scale
+
+
+def _vector_prefix_score(
+    vector: Entity,
+    target: BBox,
+    scale: float,
+    settings: ComparisonSettings,
+) -> float | None:
+    """Score a compact outlined CAD-font glyph immediately before a dimension."""
+
+    target_height = max(target[3] - target[1], 1e-9)
+    overlap = min(vector.bbox[3], target[3]) - max(vector.bbox[1], target[1])
+    gap = max(0.0, target[0] - vector.bbox[2])
+    center_delta = abs(vector.centroid[1] - 0.5 * (target[1] + target[3]))
+    if (
+        vector.width > 1.75 * scale
+        or vector.height > min(settings.structural_glyph_max_extent, 1.75 * scale)
+        or vector.width < 0.10 * scale
+        or vector.height < 0.20 * scale
+        or vector.bbox[0] > target[0]
+        or vector.bbox[2] > target[0] + 0.15 * scale
+        or gap > 0.75 * scale
+        or overlap < 0.5 * min(vector.height, target_height)
+        or center_delta > 0.75 * scale
+    ):
+        return None
+    return (gap + center_delta) / scale
+
+
+def _compact_line_glyphs(
+    geometry_entities: tuple[Entity, ...],
+    text_entities: tuple[Entity, ...],
+    excluded_ids: frozenset[str],
+    settings: ComparisonSettings,
+) -> tuple[Entity, ...]:
+    """Return textless compact outlines that can qualify a dimension.
+
+    A revision bubble can have the same size and primitive count as an
+    outlined diameter symbol.  Its enclosed revision text is stronger
+    evidence than shape complexity, so text-bearing outlines stay as ordinary
+    geometry rather than being consumed by a neighboring dimension.
+    """
+
+    return tuple(
+        entity
+        for entity in geometry_entities
+        if excluded_ids.isdisjoint(_leaf_member_ids(entity))
+        and set(dict(entity.op_histogram)) == {"l"}
+        and entity.primitive_count >= settings.structural_glyph_min_primitives
+        and entity.width <= settings.structural_glyph_max_extent
+        and entity.height <= settings.structural_glyph_max_extent
+        and not any(
+            _bbox_contains(
+                entity.bbox,
+                text.centroid,
+                max(0.0005, 0.05 * min(entity.width, entity.height)),
+            )
+            for text in text_entities
+            if _clean(text.text)
+        )
+    )
+
+
+def _unsigned_stack_hypotheses(
+    candidates: tuple[Entity, ...],
+    text_entities: tuple[Entity, ...],
+    geometry_entities: tuple[Entity, ...],
+    excluded_ids: frozenset[str],
+    settings: ComparisonSettings,
+) -> tuple[tuple[Entity, tuple[Entity, ...], tuple[Entity, ...]], ...]:
+    """Build mutually owned feature-plus-limit hypotheses without transitivity."""
+
+    numbers = tuple(entity for entity in candidates if _fragment_role(entity.text) == "nominal")
+    text_features = tuple(
+        entity for entity in candidates if _fragment_role(entity.text) == "feature"
+    )
+    vector_features = _compact_line_glyphs(
+        geometry_entities,
+        text_entities,
+        excluded_ids,
+        settings,
+    )
+    hypotheses: dict[str, tuple[float, Entity, Entity, Entity]] = {}
+    ownership: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    pairs: list[tuple[float, Entity, Entity, BBox, float]] = []
+    for first_index, first in enumerate(numbers):
+        for second in numbers[first_index + 1 :]:
+            pair_score = _unsigned_limit_pair_score(first, second, settings)
+            if pair_score is None:
+                continue
+            top, bottom = sorted((first, second), key=lambda item: (item.bbox[1], item.id))
+            pair_bbox = _bbox_union((top, bottom))
+            scale = max(_height(top), _height(bottom))
+            pairs.append((pair_score, top, bottom, pair_bbox, scale))
+
+    for pair_index, (pair_score, top, bottom, pair_bbox, scale) in enumerate(pairs):
+        competitors = tuple(
+            other_bbox
+            for other_index, (_score, _top, _bottom, other_bbox, _scale) in enumerate(pairs)
+            if other_index != pair_index
+        )
+        for marker in (*text_features, *vector_features):
+            if marker.kind == EntityKind.TEXT:
+                marker_score = _text_feature_prefix_score(marker, pair_bbox, scale)
+                same_source_line = marker.source_block_index >= 0 and any(
+                    marker.source_block_index == value.source_block_index
+                    and marker.source_line_index == value.source_line_index
+                    for value in (top, bottom)
+                )
+                has_evidence = same_source_line
+            else:
+                marker_score = _vector_prefix_score(marker, pair_bbox, scale, settings)
+                has_evidence = False
+            if marker_score is None:
+                continue
+            if not has_evidence:
+                group_bbox = _bbox_union((top, bottom, marker))
+                has_evidence = bool(
+                    _attachment_points(
+                        group_bbox,
+                        scale,
+                        (entity for entity in geometry_entities if entity.id != marker.id),
+                        settings,
+                        competitors,
+                    )
+                )
+            if has_evidence:
+                score = pair_score + marker_score
+                key = _digest("limit", top.id, bottom.id, marker.id)
+                hypotheses[key] = (score, top, bottom, marker)
+                for entity in (top, bottom, marker):
+                    ownership[entity.id].append((score, key))
+
+    best = {
+        entity_id: _clear_best(
+            choices,
+            ambiguity_margin=settings.callout_hypothesis_ambiguity_margin,
+        )
+        for entity_id, choices in ownership.items()
+    }
+    output: list[tuple[Entity, tuple[Entity, ...], tuple[Entity, ...]]] = []
+    for key, (_score, top, bottom, marker) in sorted(
+        hypotheses.items(), key=lambda item: (item[1][1].bbox, item[0])
+    ):
+        if any(best.get(entity.id) != key for entity in (top, bottom, marker)):
+            continue
+        text_members = (marker, top, bottom) if marker.kind == EntityKind.TEXT else (top, bottom)
+        vector_members = (marker,) if marker.kind == EntityKind.GEOMETRY else ()
+        output.append((top, text_members, vector_members))
+    return tuple(output)
+
+
+def _limit_dimension_text(component: tuple[Entity, ...]) -> str:
+    values = sorted(
+        (entity for entity in component if _fragment_role(entity.text) == "nominal"),
+        key=lambda entity: (entity.bbox[1], entity.id),
+    )
+    features = sorted(
+        (entity for entity in component if _fragment_role(entity.text) == "feature"),
+        key=lambda entity: (entity.bbox[0], entity.id),
+    )
+    prefix = " ".join(_clean(entity.text) for entity in features)
+    upper = " ".join(part for part in (prefix, _clean(values[0].text)) if part)
+    return f"{upper} / {_clean(values[1].text)}"
+
+
+def _leading_vector_prefixes(
+    components: tuple[tuple[Entity, ...], ...],
+    limit_indices: frozenset[int],
+    owned_vectors: frozenset[str],
+    text_entities: tuple[Entity, ...],
+    geometry_entities: tuple[Entity, ...],
+    excluded_ids: frozenset[str],
+    settings: ComparisonSettings,
+) -> dict[int, tuple[Entity, ...]]:
+    """Assign a compact leading glyph to one otherwise valid dimension."""
+
+    component_boxes = tuple(_bbox_union(component) for component in components)
+    vector_features = _compact_line_glyphs(
+        geometry_entities,
+        text_entities,
+        excluded_ids,
+        settings,
+    )
+    hypotheses: dict[str, tuple[float, int, Entity]] = {}
+    by_component: dict[int, list[tuple[float, str]]] = defaultdict(list)
+    by_vector: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    for index, component in enumerate(components):
+        if index in limit_indices or any(
+            _fragment_role(entity.text) == "feature" for entity in component
+        ):
+            continue
+        scale = max(_height(entity) for entity in component)
+        for vector in vector_features:
+            if vector.id in owned_vectors or not excluded_ids.isdisjoint(_leaf_member_ids(vector)):
+                continue
+            vector_score = _vector_prefix_score(
+                vector,
+                component_boxes[index],
+                scale,
+                settings,
+            )
+            if vector_score is None:
+                continue
+            proposed_bbox = _bbox_union((*component, vector))
+            attachments = _attachment_points(
+                proposed_bbox,
+                scale,
+                (entity for entity in geometry_entities if entity.id != vector.id),
+                settings,
+                (
+                    other_bbox
+                    for other_index, other_bbox in enumerate(component_boxes)
+                    if other_index != index
+                ),
+            )
+            if not attachments:
+                continue
+            key = _digest("vector-prefix", index, vector.id)
+            hypotheses[key] = (vector_score, index, vector)
+            by_component[index].append((vector_score, key))
+            by_vector[vector.id].append((vector_score, key))
+
+    best_component = {
+        index: _clear_best(
+            choices,
+            ambiguity_margin=settings.callout_hypothesis_ambiguity_margin,
+        )
+        for index, choices in by_component.items()
+    }
+    best_vector = {
+        vector_id: _clear_best(
+            choices,
+            ambiguity_margin=settings.callout_hypothesis_ambiguity_margin,
+        )
+        for vector_id, choices in by_vector.items()
+    }
+    output: dict[int, tuple[Entity, ...]] = {}
+    for key, (_score, index, vector) in hypotheses.items():
+        if best_component.get(index) == key and best_vector.get(vector.id) == key:
+            output[index] = (vector,)
+    return output
+
+
 def _dimension_groups(
     text_entities: tuple[Entity, ...],
     geometry_entities: tuple[Entity, ...],
@@ -1668,14 +1975,56 @@ def _dimension_groups(
     tolerances = tuple(
         entity for entity in candidates if _fragment_role(entity.text) == "tolerance"
     )
-    hypotheses = _dimension_base_hypotheses(candidates, settings)
+    stack_hypotheses = _unsigned_stack_hypotheses(
+        candidates,
+        text_entities,
+        geometry_entities,
+        excluded_ids,
+        settings,
+    )
+    stack_text_ids = frozenset(
+        entity.id for _, members, _vectors in stack_hypotheses for entity in members
+    )
+    hypotheses = _dimension_base_hypotheses(
+        tuple(entity for entity in candidates if entity.id not in stack_text_ids),
+        settings,
+    )
     hypotheses = _assign_tolerance_units(hypotheses, tolerances, settings)
     hypotheses = _attach_dimension_suffixes(hypotheses, candidates, settings)
-    components = tuple(members for _, members in hypotheses)
-    component_boxes = tuple(_bbox_union(component) for component in components)
+    components_list = [members for _, members in hypotheses]
+    component_vectors: dict[int, tuple[Entity, ...]] = {}
+    limit_indices: set[int] = set()
+    for _root, members, vectors in stack_hypotheses:
+        index = len(components_list)
+        components_list.append(members)
+        component_vectors[index] = vectors
+        limit_indices.add(index)
+    components = tuple(components_list)
+    owned_vector_ids = frozenset(
+        vector.id for vectors in component_vectors.values() for vector in vectors
+    )
+    component_vectors.update(
+        _leading_vector_prefixes(
+            components,
+            frozenset(limit_indices),
+            owned_vector_ids,
+            text_entities,
+            geometry_entities,
+            excluded_ids,
+            settings,
+        )
+    )
+    assigned_vector_ids = frozenset(
+        vector.id for vectors in component_vectors.values() for vector in vectors
+    )
+    component_boxes = tuple(
+        _bbox_union((*component, *component_vectors.get(index, ())))
+        for index, component in enumerate(components)
+    )
     output: list[tuple[Entity, tuple[str, ...]]] = []
     for index, component in enumerate(components):
-        bbox = _bbox_union(component)
+        vectors = component_vectors.get(index, ())
+        bbox = component_boxes[index]
         height = max(_height(entity) for entity in component)
         attachments = _attachment_points(
             bbox,
@@ -1688,18 +2037,23 @@ def _dimension_groups(
                 if other_index != index
             ),
         )
-        text = _dimension_text(component)
+        is_limit = index in limit_indices
+        text = _limit_dimension_text(component) if is_limit else _dimension_text(component)
         structure = _dimension_profile(
             text,
             has_attachment=bool(attachments),
             member_count=len(component),
+            allow_unsigned_stack=is_limit,
         )
         if structure is None:
             continue
+        if vectors:
+            structure = f"{structure}:vector"
         enclosed_symbols = tuple(
             entity
             for entity in geometry_entities
             if entity.id not in excluded_ids
+            and entity.id not in assigned_vector_ids
             and not _is_rectangle(entity)
             and entity.height <= height * 1.75
             and entity.width <= height * 1.75
@@ -1716,7 +2070,7 @@ def _dimension_groups(
         )
         composite = _composite_callout(
             component,
-            enclosed_symbols,
+            (*vectors, *enclosed_symbols),
             ChangeCategory.DIMENSION,
             structure,
             text,
@@ -1725,7 +2079,7 @@ def _dimension_groups(
         output.append(
             (
                 composite,
-                _flatten_member_ids((*component, *enclosed_symbols)),
+                _flatten_member_ids((*component, *vectors, *enclosed_symbols)),
             )
         )
     return tuple(output)

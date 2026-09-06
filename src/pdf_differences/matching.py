@@ -20,6 +20,7 @@ from pdf_differences.matching_algorithms import NATIVE_MATCHING_BACKEND, Matchin
 from pdf_differences.mechanical import classify_text
 from pdf_differences.models import (
     BBox,
+    ChangeCategory,
     Entity,
     EntityKind,
     EntityMatch,
@@ -118,6 +119,62 @@ def _position_score(distance: float, radius: float) -> float:
 
 def _is_callout(entity: Entity) -> bool:
     return entity.callout_category is not None
+
+
+def _is_unparented_vector_glyph(
+    entity: Entity,
+    page: tuple[Entity, ...],
+    settings: ComparisonSettings,
+) -> bool:
+    """Return whether a raw geometry entity looks like a repeated CAD-font glyph.
+
+    These textless compact, many-segment line outlines are safe to match at the
+    same position, but a loose structural move has no evidence tying the symbol
+    to the same dimension or feature. Reconstructed callouts consume such
+    symbols before matching and therefore do not pass through this raw-entity
+    guard. Text-bearing outlines, such as revision bubbles, are not glyphs.
+    """
+
+    operations = set(dict(entity.op_histogram))
+    compact_line_outline = (
+        entity.kind == EntityKind.GEOMETRY
+        and operations == {"l"}
+        and entity.primitive_count >= settings.structural_glyph_min_primitives
+        and entity.width <= settings.structural_glyph_max_extent
+        and entity.height <= settings.structural_glyph_max_extent
+    )
+    if not compact_line_outline:
+        return False
+    containment_tolerance = max(0.0005, 0.05 * min(entity.width, entity.height))
+    if any(
+        candidate.kind == EntityKind.TEXT
+        and candidate.text.strip()
+        and entity.bbox[0] - containment_tolerance
+        <= candidate.centroid[0]
+        <= entity.bbox[2] + containment_tolerance
+        and entity.bbox[1] - containment_tolerance
+        <= candidate.centroid[1]
+        <= entity.bbox[3] + containment_tolerance
+        for candidate in page
+    ):
+        return False
+    for candidate in page:
+        if (
+            candidate.kind != EntityKind.TEXT
+            or classify_text(candidate.text, candidate.bbox, page) != ChangeCategory.DIMENSION
+        ):
+            continue
+        scale = max(candidate.height, candidate.font_size, 1e-5)
+        gap = max(0.0, candidate.bbox[0] - entity.bbox[2])
+        overlap = min(entity.bbox[3], candidate.bbox[3]) - max(entity.bbox[1], candidate.bbox[1])
+        if (
+            entity.bbox[0] <= candidate.bbox[0]
+            and entity.bbox[2] <= candidate.bbox[0] + 0.15 * scale
+            and gap <= 0.75 * scale
+            and overlap >= 0.5 * min(entity.height, candidate.height)
+        ):
+            return True
+    return False
 
 
 def _callout_pair_features(
@@ -229,6 +286,10 @@ def structural_score(
         or distance > settings.structural_search_radius
     ):
         return 0.0
+    if _is_unparented_vector_glyph(old, old_page, settings) or _is_unparented_vector_glyph(
+        new, new_page, settings
+    ):
+        return 0.0
     context = _context_similarity(old_context[old.id], new_context[new.id])
     position = _position_score(distance, settings.structural_search_radius)
     style = float(old.style_signature == new.style_signature)
@@ -246,11 +307,21 @@ def structural_score(
                 + 0.17 * position
                 + 0.14 * context
             )
+        old_category = classify_text(old.text, old.bbox, old_page)
+        new_category = classify_text(new.text, new.bbox, new_page)
+        # Once both the value and location of a raw dimension fragment change,
+        # category equality alone cannot establish object identity. A complete
+        # reconstructed callout can still move and change through its topology
+        # and leader evidence; an orphan fragment is conservatively left as a
+        # removal plus an addition.
+        if (
+            old_category == new_category == ChangeCategory.DIMENSION
+            and old.text_normalized != new.text_normalized
+            and distance > settings.attribute_position_tolerance
+        ):
+            return 0.0
         content = _text_similarity(old.text_normalized, new.text_normalized)
-        category = float(
-            classify_text(old.text, old.bbox, old_page)
-            == classify_text(new.text, new.bbox, new_page)
-        )
+        category = float(old_category == new_category)
         size = _ratio(old.font_size, new.font_size)
         return 0.36 * content + 0.17 * category + 0.12 * size + 0.18 * context + 0.17 * position
 

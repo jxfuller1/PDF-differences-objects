@@ -12,6 +12,8 @@ def _text(
     *,
     width: float | None = None,
     height: float = 0.014,
+    source_block_index: int = -1,
+    source_line_index: int = -1,
 ) -> Entity:
     x, y = point
     text_width = width if width is not None else max(0.014, 0.0065 * len(text))
@@ -27,6 +29,8 @@ def _text(
         text=text,
         text_normalized=text.casefold(),
         font_size=0.011,
+        source_block_index=source_block_index,
+        source_line_index=source_line_index,
     )
 
 
@@ -158,6 +162,307 @@ def _vector_symbol(entity_id: str, bbox: tuple[float, float, float, float]) -> E
         primitive_count=2,
         path_length=0.04,
     )
+
+
+def test_unsigned_radius_limit_stack_reconstructs_as_one_dimension():
+    entities = (
+        _text(
+            "feature",
+            "R",
+            (0.112, 0.20),
+            width=0.012,
+            source_block_index=4,
+            source_line_index=0,
+        ),
+        _text(
+            "upper",
+            ".055",
+            (0.125, 0.185),
+            width=0.030,
+            source_block_index=4,
+            source_line_index=0,
+        ),
+        _text("lower", ".045", (0.125, 0.215), width=0.030),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert len(composites) == 1
+    assert composites[0].text == "R .055 / .045"
+    assert composites[0].callout_structure == "dimension:radius:limit"
+    assert set(composites[0].callout_member_ids) == {"feature", "upper", "lower"}
+
+
+def test_compact_vector_diameter_glyph_joins_numeric_limit_stack():
+    segments = (
+        ((0.108, 0.20), (0.112, 0.22)),
+        ((0.112, 0.22), (0.116, 0.20)),
+        ((0.116, 0.20), (0.108, 0.22)),
+        ((0.108, 0.22), (0.116, 0.20)),
+    ) * 4
+    entities = (
+        _geometry("diameter-glyph", (0.10, 0.20, 0.116, 0.22), segments),
+        _text("upper", ".055", (0.125, 0.185), width=0.030),
+        _text("lower", ".045", (0.125, 0.215), width=0.030),
+        _geometry(
+            "leader",
+            (0.155, 0.207, 0.250, 0.300),
+            (((0.155, 0.207), (0.250, 0.300)),),
+        ),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert len(composites) == 1
+    assert composites[0].text == ".055 / .045"
+    assert composites[0].callout_structure == "dimension:linear:limit:vector"
+    assert set(composites[0].callout_member_ids) == {"diameter-glyph", "upper", "lower"}
+
+
+def test_compact_vector_prefix_joins_one_qualified_dimension():
+    segments = (
+        ((0.108, 0.20), (0.112, 0.22)),
+        ((0.112, 0.22), (0.116, 0.20)),
+        ((0.116, 0.20), (0.108, 0.22)),
+        ((0.108, 0.22), (0.116, 0.20)),
+    ) * 4
+    entities = (
+        _geometry("diameter-glyph", (0.10, 0.20, 0.116, 0.22), segments),
+        _text("dimension", ".141 THRU", (0.125, 0.203), width=0.075),
+        _geometry(
+            "leader",
+            (0.200, 0.210, 0.300, 0.300),
+            (((0.200, 0.210), (0.300, 0.300)),),
+        ),
+    )
+
+    result = reconstruct_callouts(entities)
+    composite = next(entity for entity in result if entity.callout_category is not None)
+
+    assert composite.callout_structure == "dimension:linear:vector"
+    assert set(composite.callout_member_ids) == {"diameter-glyph", "dimension"}
+    assert composite.bbox[0] == 0.10
+
+
+def test_simple_arrowhead_cannot_become_a_vector_dimension_prefix():
+    arrow = _geometry(
+        "arrow",
+        (0.10, 0.20, 0.116, 0.22),
+        (
+            ((0.10, 0.21), (0.116, 0.20)),
+            ((0.10, 0.21), (0.116, 0.22)),
+            ((0.116, 0.20), (0.116, 0.22)),
+        ),
+    )
+    entities = (arrow, _text("dimension", ".141 THRU", (0.125, 0.203), width=0.075))
+
+    result = reconstruct_callouts(entities)
+    composite = next(entity for entity in result if entity.callout_category is not None)
+
+    assert composite.callout_member_ids == ("dimension",)
+    assert any(entity.id == "arrow" for entity in result)
+
+
+def test_dense_line_art_without_a_leader_cannot_become_a_vector_prefix():
+    segments = tuple(
+        ((0.100 + index * 0.001, 0.200), (0.101 + index * 0.001, 0.220)) for index in range(16)
+    )
+    artwork = _geometry("dense-artwork", (0.10, 0.20, 0.116, 0.22), segments)
+    entities = (artwork, _text("dimension", ".141 THRU", (0.125, 0.203), width=0.075))
+
+    result = reconstruct_callouts(entities)
+    composite = next(entity for entity in result if entity.callout_category is not None)
+
+    assert composite.callout_member_ids == ("dimension",)
+    assert any(entity.id == "dense-artwork" for entity in result)
+
+
+def test_text_bearing_revision_bubble_cannot_become_a_vector_prefix():
+    segments = tuple(
+        ((0.100 + index * 0.001, 0.200), (0.101 + index * 0.001, 0.220)) for index in range(16)
+    )
+    bubble = _geometry("revision-bubble", (0.10, 0.20, 0.116, 0.22), segments)
+    entities = (
+        bubble,
+        _text("revision", "B1", (0.103, 0.203), width=0.010),
+        _text("dimension", ".141 THRU", (0.125, 0.203), width=0.075),
+        _geometry(
+            "leader",
+            (0.200, 0.210, 0.300, 0.300),
+            (((0.200, 0.210), (0.300, 0.300)),),
+        ),
+    )
+
+    result = reconstruct_callouts(entities)
+    composite = next(entity for entity in result if entity.callout_category is not None)
+
+    assert composite.callout_member_ids == ("dimension",)
+    assert {entity.id for entity in result if entity.callout_category is None} >= {
+        "revision-bubble",
+        "revision",
+    }
+
+
+def test_unsigned_number_stack_without_feature_evidence_stays_raw():
+    entities = (
+        _text("upper", ".055", (0.125, 0.185), width=0.030),
+        _text("lower", ".045", (0.125, 0.215), width=0.030),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category is not None for entity in result)
+    assert {entity.id for entity in result} == {"upper", "lower"}
+
+
+def test_feature_and_unrelated_numeric_rows_without_source_or_leader_evidence_stay_raw():
+    entities = (
+        _text("feature", "R", (0.112, 0.20), width=0.012),
+        _text("upper", ".055", (0.125, 0.185), width=0.030),
+        _text("lower", ".045", (0.125, 0.215), width=0.030),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category is not None for entity in result)
+    assert {entity.id for entity in result} == {"feature", "upper", "lower"}
+
+
+def test_adjacent_unsigned_limit_stacks_keep_separate_feature_ownership():
+    entities = (
+        _text(
+            "radius",
+            "R",
+            (0.112, 0.20),
+            width=0.012,
+            source_block_index=4,
+            source_line_index=0,
+        ),
+        _text(
+            "radius-upper",
+            ".055",
+            (0.125, 0.185),
+            width=0.030,
+            source_block_index=4,
+            source_line_index=0,
+        ),
+        _text("radius-lower", ".045", (0.125, 0.215), width=0.030),
+        _text(
+            "diameter",
+            "DIA",
+            (0.300, 0.20),
+            width=0.024,
+            source_block_index=7,
+            source_line_index=0,
+        ),
+        _text(
+            "diameter-upper",
+            ".750",
+            (0.325, 0.185),
+            width=0.030,
+            source_block_index=7,
+            source_line_index=0,
+        ),
+        _text("diameter-lower", ".745", (0.325, 0.215), width=0.030),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert {entity.text for entity in composites} == {
+        "R .055 / .045",
+        "DIA .750 / .745",
+    }
+    assert len(composites) == 2
+
+
+def test_one_vector_prefix_tied_between_callouts_remains_raw():
+    segments = (
+        ((0.108, 0.20), (0.112, 0.22)),
+        ((0.112, 0.22), (0.116, 0.20)),
+        ((0.116, 0.20), (0.108, 0.22)),
+        ((0.108, 0.22), (0.116, 0.20)),
+    ) * 4
+    vector = _geometry("ambiguous-glyph", (0.10, 0.20, 0.116, 0.22), segments)
+    entities = (
+        vector,
+        _text("first", ".141 THRU", (0.125, 0.203), width=0.075),
+        _text("second", ".151 THRU", (0.125, 0.203), width=0.075),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert len(composites) == 2
+    assert all("ambiguous-glyph" not in entity.callout_member_ids for entity in composites)
+    assert any(entity.id == "ambiguous-glyph" for entity in result)
+
+
+def test_unrelated_limit_and_diameter_callouts_remain_additions_and_removals():
+    def glyph(entity_id: str, x: float, y: float) -> Entity:
+        segments = (
+            ((x + 0.008, y), (x + 0.012, y + 0.020)),
+            ((x + 0.012, y + 0.020), (x + 0.016, y)),
+            ((x + 0.016, y), (x + 0.008, y + 0.020)),
+            ((x + 0.008, y + 0.020), (x + 0.016, y)),
+        ) * 4
+        return _geometry(entity_id, (x, y, x + 0.016, y + 0.020), segments)
+
+    old = reconstruct_callouts(
+        (
+            glyph("old-diameter", 0.49, 0.54),
+            _text("old-upper", ".8745", (0.515, 0.525), width=0.034),
+            _text("old-lower", ".8740", (0.515, 0.555), width=0.034),
+            _geometry(
+                "old-leader",
+                (0.420, 0.552, 0.515, 0.620),
+                (((0.515, 0.552), (0.420, 0.620)),),
+            ),
+        )
+    )
+    new = reconstruct_callouts(
+        (
+            _text(
+                "radius",
+                "R",
+                (0.437, 0.49),
+                width=0.012,
+                source_block_index=4,
+                source_line_index=0,
+            ),
+            _text(
+                "radius-upper",
+                ".055",
+                (0.450, 0.475),
+                width=0.030,
+                source_block_index=4,
+                source_line_index=0,
+            ),
+            _text("radius-lower", ".045", (0.450, 0.505), width=0.030),
+            glyph("new-diameter", 0.54, 0.50),
+            _text("new-dimension", ".141 THRU", (0.565, 0.503), width=0.075),
+            _geometry(
+                "new-leader",
+                (0.640, 0.450, 0.700, 0.510),
+                (((0.640, 0.510), (0.700, 0.450)),),
+            ),
+        )
+    )
+
+    result = match_entities(old, new)
+
+    assert not result.matches
+    assert {
+        entity.text for entity in result.unmatched_old if entity.callout_category is not None
+    } == {".8745 / .8740"}
+    assert {
+        entity.text for entity in result.unmatched_new if entity.callout_category is not None
+    } == {
+        "R .055 / .045",
+        ".141 THRU",
+    }
 
 
 def test_fragmented_dimension_reconstructs_once_and_skips_non_dimension_neighbors():
