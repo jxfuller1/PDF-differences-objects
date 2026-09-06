@@ -27,6 +27,12 @@ class ComparisonSettings:
     moved_tolerance: float = 0.006
     attribute_min_score: float = 0.58
     structural_min_score: float = 0.68
+    # Small, textless line-built CAD-font glyphs (diameter, degree, datum
+    # symbols, and similar marks) repeat throughout drawings and have no safe
+    # identity when detached from a reconstructed callout. Keep their loose
+    # move matching disabled; exact and in-place attribute matching remain.
+    structural_glyph_max_extent: float = 0.035
+    structural_glyph_min_primitives: int = 12
     # Above this component size, sparse min-cost flow bounds assignment memory.
     # Dense NumPy-backed Hungarian assignment is faster below the threshold.
     sparse_assignment_threshold: int = 1200
@@ -37,6 +43,9 @@ class ComparisonSettings:
     callout_inline_gap_factor: float = 2.75
     callout_baseline_tolerance_factor: float = 0.55
     callout_stacked_gap_factor: float = 2.25
+    callout_tolerance_pair_alignment_factor: float = 0.75
+    callout_limit_width_ratio: float = 0.75
+    callout_hypothesis_ambiguity_margin: float = 0.20
     callout_frame_edge_tolerance: float = 0.003
     # Much tighter than frame containment: this only reconciles coordinate
     # noise while rebuilding local line topology from CAD drawing records.
@@ -46,6 +55,9 @@ class ComparisonSettings:
     callout_max_frame_height: float = 0.08
     callout_max_frame_width: float = 0.55
     callout_max_frame_cells: int = 12
+    callout_vector_feature_min_fill: float = 0.15
+    callout_vector_feature_max_fill: float = 0.92
+    callout_vector_feature_max_center_offset: float = 0.25
     callout_leader_touch_factor: float = 1.25
     callout_attachment_ambiguity_factor: float = 0.35
     callout_attachment_match_tolerance: float = 0.035
