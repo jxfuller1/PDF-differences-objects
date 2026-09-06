@@ -61,6 +61,42 @@ def test_inconsistent_anchor_correspondences_fail_instead_of_guessing():
     assert result.status == "failed"
 
 
+def test_large_consensus_translation_uses_page_frame_fallback():
+    expected = Transform(tx=0.24, ty=-0.18)
+    points = ((0.1, 0.25), (0.55, 0.2), (0.2, 0.7), (0.6, 0.65))
+    old = tuple(_entity(f"o{i}", f"ANCHOR {i}", point) for i, point in enumerate(points))
+    new = tuple(
+        _entity(f"n{i}", f"ANCHOR {i}", transform_point(point, expected))
+        for i, point in enumerate(points)
+    )
+
+    result = estimate_alignment(old, new)
+
+    assert result.status == "identity-unverified"
+    assert result.anchor_count == len(points)
+    assert result.inlier_count == len(points)
+    assert result.inlier_ratio == 1.0
+    assert result.transform == Transform()
+    assert "beyond the configured 15.00% limit" in result.note
+
+
+def test_origin_shift_sanity_limit_is_configurable():
+    expected = Transform(tx=0.24, ty=-0.18)
+    points = ((0.1, 0.25), (0.55, 0.2), (0.2, 0.7), (0.6, 0.65))
+    old = tuple(_entity(f"o{i}", f"ANCHOR {i}", point) for i, point in enumerate(points))
+    new = tuple(
+        _entity(f"n{i}", f"ANCHOR {i}", transform_point(point, expected))
+        for i, point in enumerate(points)
+    )
+    settings = ComparisonSettings(alignment_max_origin_shift=0.3)
+
+    result = estimate_alignment(old, new, settings)
+
+    assert result.status == "aligned"
+    assert result.transform.tx == pytest.approx(expected.tx)
+    assert result.transform.ty == pytest.approx(expected.ty)
+
+
 def test_dense_alignment_tests_a_majority_cover_even_with_small_sample_limit():
     expected = Transform(scale=1.01, rotation_radians=0.012, tx=0.014, ty=-0.009)
     points = tuple((0.06 + (index % 8) * 0.105, 0.08 + (index // 8) * 0.17) for index in range(40))

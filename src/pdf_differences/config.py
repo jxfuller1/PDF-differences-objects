@@ -16,6 +16,9 @@ class ComparisonSettings:
     alignment_min_inlier_ratio: float = 0.55
     alignment_max_rms: float = 0.004
     alignment_max_hypotheses: int = 400
+    # Reject otherwise-consistent transforms that move the normalized page
+    # origin implausibly far from the other page's top-left corner.
+    alignment_max_origin_shift: float = 0.15
 
     # CADMorph-inspired deterministic matching cascade.
     exact_position_tolerance: float = 0.0025

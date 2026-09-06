@@ -75,7 +75,9 @@ In the app:
    control the overlays. Selecting a table row zooms and centers its region;
    clicking a region selects and reveals its corresponding table row.
 5. Filter by change type, parser category, free text, or inspection relevance.
-   The table and visible change regions always use the same active filters.
+   Type and category use Excel-style checkbox menus with **Select All** and
+   **Unselect All** actions. The table and visible change regions always use
+   the same active filters.
 6. Export structured JSON, CSV, or an annotated copy of the revised PDF.
 
 ## Viewer appearance and blink settings
@@ -113,6 +115,10 @@ translation/rotation/uniform-scale transform. Comparisons are declined when a
 populated page has enough anchors but no reliable transform, instead of emitting
 a misleading whole-sheet change. When fewer than two anchors are available, the
 viewer safely overlays the page frames without applying an unverified translation.
+The same page-frame fallback applies when a proposed transform would move the
+top-left page origin beyond the configured sanity limit. The default is 15% of
+either normalized page dimension and can be changed with
+`ComparisonSettings.alignment_max_origin_shift` in `config.py`.
 
 ## Mechanical parser and relevance
 

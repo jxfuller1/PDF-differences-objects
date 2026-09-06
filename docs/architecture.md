@@ -57,12 +57,16 @@ guarantees that any strict majority of distinct-location anchors contributes an
 all-inlier pair; additional pairs are sampled with a local fixed-seed generator.
 Each hypothesis is scored by inlier count and residual, and the best consensus is
 refined by a least-squares 2-D similarity fit.
+Even a consensus transform must keep the mapped page origin within the
+configured normalized displacement limit. A larger top-left shift is treated
+as implausible and falls back to an unregistered page-frame overlay.
 
 Statuses are explicit:
 
 - `aligned`: transform passed inlier and RMS thresholds;
-- `identity-unverified`: fewer than two trustworthy anchors existed, or one
-  side was blank; page frames are overlaid without registration;
+- `identity-unverified`: fewer than two trustworthy anchors existed, a proposed
+  transform moved the page origin implausibly far, or one side was blank; page
+  frames are overlaid without registration;
 - `not-applicable`: a page exists in only one revision;
 - `failed`: populated sheets had anchors but no trustworthy registration; the
   comparison stops with an actionable error.

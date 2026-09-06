@@ -227,6 +227,23 @@ def estimate_alignment(
     )
     ratio = len(refined_inliers) / len(pairs)
     accepted = ratio >= settings.alignment_min_inlier_ratio and rms <= settings.alignment_max_rms
+    origin_shift = max(abs(refined.tx), abs(refined.ty))
+    if accepted and origin_shift > settings.alignment_max_origin_shift:
+        return AlignmentResult(
+            status="identity-unverified",
+            transform=identity,
+            anchor_count=len(pairs),
+            inlier_count=len(refined_inliers),
+            inlier_ratio=round(ratio, 6),
+            rms_residual=round(rms, 8),
+            note=(
+                "Anchor alignment would move the page origin "
+                f"{abs(refined.tx) * 100:.2f}% horizontally and "
+                f"{abs(refined.ty) * 100:.2f}% vertically, beyond the configured "
+                f"{settings.alignment_max_origin_shift * 100:.2f}% limit; the page frames "
+                "were overlaid without registration."
+            ),
+        )
     return AlignmentResult(
         status="aligned" if accepted else "failed",
         transform=refined if accepted else identity,
