@@ -27,9 +27,9 @@ class ComparisonSettings:
     moved_tolerance: float = 0.006
     attribute_min_score: float = 0.58
     structural_min_score: float = 0.68
-    # Dense Hungarian matrices are convenient for small ambiguity groups. Larger
-    # groups use SciPy's sparse global bipartite solver with the same objective.
-    sparse_assignment_threshold: int = 300
+    # Above this component size, sparse min-cost flow bounds assignment memory.
+    # Dense NumPy-backed Hungarian assignment is faster below the threshold.
+    sparse_assignment_threshold: int = 1200
 
     # Text/geometry interpretation.
     nearby_annotation_radius: float = 0.035

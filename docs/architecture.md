@@ -30,6 +30,7 @@ three are configurable in `ComparisonSettings`.
 | `extraction.py` | Canonical text and vector entities with stable hashes |
 | `alignment.py` | Unique-anchor construction and deterministic robust similarity fit |
 | `matching.py` | Exact, attribute, and structural one-to-one matching cascade |
+| `matching_algorithms.py` | NumPy/Python spatial queries and global assignment solvers |
 | `comparison.py` | Page orchestration, change typing, traceability, and summaries |
 | `mechanical.py` | Mechanical parser buckets and inspection-relevance reasons |
 | `reporting.py` | JSON, CSV, and vector annotation exports |
@@ -87,7 +88,7 @@ resolved nearest-first with stable ID tie-breaks.
 
 ### Tier 2 — attribute
 
-A spatial tree exposes only same-kind candidates in a small in-place radius.
+A uniform spatial hash exposes only same-kind candidates in a small in-place radius.
 Text scores combine registered position, payload similarity, mechanical class,
 font size, and style. Geometry scores combine registered position, aligned-box
 overlap, operation histogram, aspect, and style. Accepted pairs use a stable
@@ -103,13 +104,27 @@ Siamese encoder:
 - path-operation overlap, aspect/area/path-length agreement, style, local entity
   context, and registered distance.
 
-Each connected candidate component is solved with the Hungarian algorithm and
-private dummy columns, so leaving an entity unmatched is cheaper than forcing a
-below-threshold pair. Small components use a dense cost matrix; large components
-use a sparse minimum-weight full bipartite solver with the same global objective,
-which bounds memory without degrading to greedy assignment. Candidates outside
-the structural radius are never paired, which is the moved-versus-removed/added
+Each connected candidate component includes private dummy columns, so leaving
+an entity unmatched is cheaper than forcing a below-threshold pair. Components
+up to the configured threshold use a rectangular primal-dual Hungarian solver;
+larger components use sparse successive-shortest-path min-cost flow to bound
+memory. Both are implemented with NumPy and Python. Candidates outside the
+structural radius are never paired, which is the moved-versus-removed/added
 guard.
+
+The implementation follows the standard linear-sum-assignment formulation and
+is tested against exhaustive small-matrix solutions. An optional benchmark
+backend retains the former SciPy `linear_sum_assignment`, sparse bipartite
+matching, and `cKDTree` calls outside the production package. It verifies entity
+matches and final detected changes in addition to reporting timings. SciPy
+documents its dense solver as a modified Jonker–Volgenant algorithm and its
+sparse solver as LAPJVsp; those implementations are reference oracles rather
+than runtime dependencies:
+
+- [SciPy linear sum assignment](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html)
+- [SciPy sparse bipartite matching](https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.csgraph.min_weight_full_bipartite_matching.html)
+- [SciPy cKDTree](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html)
+- [Kuhn's original Hungarian-method paper](https://doi.org/10.1002/nav.3800020109)
 
 The returned numeric value is named a *similarity score*, not a statistical
 confidence: it is a transparent heuristic, not a calibrated probability.
