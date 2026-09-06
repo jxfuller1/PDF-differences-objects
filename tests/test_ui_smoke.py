@@ -6,13 +6,14 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from helpers import make_fragmented_callout_pdf  # noqa: E402
 from PyQt6.QtCore import QAbstractAnimation, Qt  # noqa: E402
 from PyQt6.QtTest import QTest  # noqa: E402
 from PyQt6.QtWidgets import QApplication, QCheckBox, QPlainTextEdit  # noqa: E402
 
 import pdf_differences.ui.viewer_settings as viewer_settings  # noqa: E402
 from pdf_differences.comparison import compare_pdfs  # noqa: E402
-from pdf_differences.models import ChangeType  # noqa: E402
+from pdf_differences.models import ChangeCategory, ChangeType  # noqa: E402
 from pdf_differences.ui.app import PdfDifferencesWindow  # noqa: E402
 from pdf_differences.ui.viewer import OverlayPageViewer  # noqa: E402
 from pdf_differences.ui.worker import ComparisonWorker  # noqa: E402
@@ -123,6 +124,34 @@ def test_overlay_blends_and_blinks_toggleable_added_and_removed_regions():
     assert not viewer._regions[removed.id].isVisible()
     viewer.blink_regions(False)
     assert viewer._pulse_animation.state() == QAbstractAnimation.State.Stopped
+    viewer.deleteLater()
+
+
+def test_modified_dimension_blinks_as_one_whole_callout_region(tmp_path):
+    application = QApplication.instance() or QApplication([])
+    old_path = make_fragmented_callout_pdf(tmp_path / "old.pdf", nominal=".255")
+    new_path = make_fragmented_callout_pdf(tmp_path / "new.pdf", nominal=".455")
+    result = compare_pdfs(old_path, new_path)
+    dimension_changes = tuple(
+        change for change in result.changes if change.category == ChangeCategory.DIMENSION
+    )
+
+    assert len(result.changes) == 1
+    assert len(dimension_changes) == 1
+    change = dimension_changes[0]
+    viewer = OverlayPageViewer()
+    viewer.load_page(str(old_path), str(new_path), result.pages[0], result.changes)
+    application.processEvents()
+
+    assert tuple(viewer._regions) == (change.id,)
+    region = viewer._regions[change.id].rect()
+    page = viewer._page_bounds
+    assert page is not None
+    assert abs(region.left() - change.bbox[0] * page.width()) < 1e-6
+    assert abs(region.top() - change.bbox[1] * page.height()) < 1e-6
+    assert abs(region.right() - change.bbox[2] * page.width()) < 1e-6
+    assert abs(region.bottom() - change.bbox[3] * page.height()) < 1e-6
+    assert viewer._pulse_animation.state() == QAbstractAnimation.State.Running
     viewer.deleteLater()
 
 

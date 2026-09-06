@@ -35,7 +35,7 @@ _NON_DIMENSION_CONTEXT = re.compile(
 )
 _DIMENSION = re.compile(
     r"(?:^|\s)(?:\d+\s*[xX]\s*)?(?:R|SR|Ø|⌀|DIA\.?|M)?\s*"
-    r"\d+(?:[.,]\d+)?(?:\s*/\s*\d+)?\s*"
+    r"(?:\d+(?:[.,]\d+)?|[.,]\d+)(?:\s*/\s*\d+)?\s*"
     r"(?:MM|CM|M|IN|FT|°|DEG|\"|')?"
     r"(?:\s*(?:±|\+/-|\+\s*\d|[-+]\s*\d|MAX\b|MIN\b|REF\b|TYP\b|THRU\b|"
     r"EQ\s+SP))?",
@@ -127,11 +127,15 @@ def interpret_change(
     bbox: BBox,
     page_entities: Iterable[Entity],
     settings: ComparisonSettings = SETTINGS,
+    *,
+    category_hint: ChangeCategory | None = None,
 ) -> Interpretation:
     """Assign the diagram's parser bucket and an auditable relevance decision."""
 
     combined = " -> ".join(value for value in (before_text, after_text) if value)
-    if kind == EntityKind.TEXT:
+    if category_hint is not None:
+        category = category_hint
+    elif kind == EntityKind.TEXT:
         category = classify_text(combined, bbox, page_entities, settings)
     else:
         category = ChangeCategory.GEOMETRY

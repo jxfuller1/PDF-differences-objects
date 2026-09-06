@@ -28,6 +28,7 @@ three are configurable in `ComparisonSettings`.
 | --- | --- |
 | `validation.py` | PDF/header/size/encryption checks and per-page capability inventory |
 | `extraction.py` | Canonical text and vector entities with stable hashes |
+| `callouts.py` | Conservative reconstruction of dimensions and GD&T callouts from fragments |
 | `alignment.py` | Unique-anchor construction and deterministic robust similarity fit |
 | `matching.py` | Exact, attribute, and structural one-to-one matching cascade |
 | `matching_algorithms.py` | NumPy/Python spatial queries and global assignment solvers |
@@ -52,6 +53,42 @@ payload, font, relative font size, insertion anchor, and bounds.
 
 Stable signatures and canonical sorting make repeated comparisons deterministic.
 The code never assigns random UUIDs to extracted entities or changes.
+
+## Semantic callout reconstruction
+
+`callouts.py` runs after raw-entity alignment and before matching. It merges
+only fragments that are clearly part of one mechanical annotation. The rules
+are intentionally conservative:
+
+- dimensions are rebuilt when inline grammar or stacked tolerance structure
+  makes the relationship explicit. Standalone `+` and `-` glyphs are paired
+  with a numeric tolerance only when their baseline, writing direction, reading
+  order, font-relative gap, and nearest-candidate margin agree;
+- GD&T is rebuilt from adjoining frame topology and contained semantic cells,
+  or from an explicit GD&T marker sequence. A vector/custom-font symbol can be
+  inferred only when a compound frame has a tolerance followed by multiple
+  datum/material-condition cells;
+- when an exporter batches unrelated lines into one drawing record, disconnected
+  straight-line components are assigned stable local IDs. Collinear coverage is
+  merged within a tight coordinate-noise tolerance, and virtual cells require
+  two continuous rails plus two walls. Cell geometry alone is insufficient:
+  contained text must still pass GD&T sequence grammar;
+- proximity only narrows the candidate set and never authorizes grouping;
+- closed rectangular paths cannot become leader evidence, and a leader endpoint
+  is retained only when its ownership is unambiguous among candidate callouts;
+- repeated dimensions compare aligned feature/leader attachment points and are
+  rejected when more than one candidate remains materially tied;
+- ambiguous or unsupported layouts remain as separate raw entities.
+
+Composite entities retain member IDs, structure labels, and attachment points.
+That traceability lets comparison and reporting treat the whole union as one
+logical change while still exposing the original fragments in the output.
+Matching never compares a composite member again in the global raw-entity pool.
+If only some local components of a batched drawing record are consumed, its
+unconsumed components remain as residual geometry; if none are consumed, the
+original entity is returned unchanged.
+If any composite member changes, comparison emits one modified row whose box is
+the complete callout union; additions and removals likewise emit one row.
 
 ## Alignment
 
@@ -112,6 +149,11 @@ memory. Both are implemented with NumPy and Python. Candidates outside the
 structural radius are never paired, which is the moved-versus-removed/added
 guard.
 
+Reconstructed callouts add category, grammar/frame structure, union-box
+position, and aligned attachment agreement to these tiers. Raw entities are
+never paired with callout composites. A configurable best-versus-second-best
+margin rejects ambiguous repeated-callout candidates before assignment.
+
 The implementation follows the standard linear-sum-assignment formulation and
 is tested against exhaustive small-matrix solutions. An optional benchmark
 backend retains the former SciPy `linear_sum_assignment`, sparse bipartite
@@ -164,7 +206,8 @@ closed per load so file handles do not leak.
 All outputs derive from the same immutable `ComparisonResult`:
 
 - JSON preserves the complete nested page/change schema;
-- CSV flattens one row per change, including relevance reason and match tier;
+- CSV flattens one row per change, including relevance reason, match tier, and
+  reconstructed-callout member IDs;
 - the annotated PDF draws colored vector rectangles on a copy of the new PDF.
 
 Color convention: green added, red removed, orange moved, and blue modified.

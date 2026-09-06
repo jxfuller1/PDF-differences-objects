@@ -9,6 +9,7 @@ from typing import Any
 
 BBox = tuple[float, float, float, float]
 Point = tuple[float, float]
+Segment = tuple[Point, Point]
 
 
 class EntityKind(StrEnum):
@@ -40,7 +41,7 @@ class ChangeCategory(StrEnum):
 
 @dataclass(frozen=True, slots=True)
 class Entity:
-    """One exact text span or vector path extracted from a PDF display list."""
+    """One raw PDF object or one reconstructed mechanical callout."""
 
     id: str
     page_index: int
@@ -57,6 +58,15 @@ class Entity:
     op_histogram: tuple[tuple[str, int], ...] = ()
     primitive_count: int = 0
     path_length: float = 0.0
+    source_block_index: int = -1
+    source_line_index: int = -1
+    source_span_index: int = -1
+    writing_direction: Point = (1.0, 0.0)
+    geometry_segments: tuple[Segment, ...] = ()
+    callout_category: ChangeCategory | None = None
+    callout_structure: str = ""
+    callout_member_ids: tuple[str, ...] = ()
+    callout_attachment_points: tuple[Point, ...] = ()
 
     @property
     def centroid(self) -> Point:
@@ -132,6 +142,8 @@ class Change:
     after_text: str | None = None
     match_tier: MatchTier | None = None
     similarity_score: float | None = None
+    old_member_entity_ids: tuple[str, ...] = ()
+    new_member_entity_ids: tuple[str, ...] = ()
 
     @property
     def area(self) -> float:

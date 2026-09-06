@@ -20,6 +20,7 @@ from benchmarks.scipy_backend import (
     SCIPY_VERSION,
 )
 from pdf_differences.alignment import estimate_alignment
+from pdf_differences.callouts import reconstruct_callouts
 from pdf_differences.comparison import _changes_from_match
 from pdf_differences.config import SETTINGS
 from pdf_differences.extraction import extract_page_entities
@@ -43,18 +44,18 @@ def _page_inputs(old_path: Path, new_path: Path) -> tuple[PageInput, ...]:
     try:
         pages: list[PageInput] = []
         for page_index in range(max(old_document.page_count, new_document.page_count)):
-            old_entities = (
+            raw_old_entities = (
                 extract_page_entities(old_document.load_page(page_index), page_index)
                 if page_index < old_document.page_count
                 else ()
             )
-            new_entities = (
+            raw_new_entities = (
                 extract_page_entities(new_document.load_page(page_index), page_index)
                 if page_index < new_document.page_count
                 else ()
             )
-            if old_entities and new_entities:
-                alignment = estimate_alignment(old_entities, new_entities)
+            if raw_old_entities and raw_new_entities:
+                alignment = estimate_alignment(raw_old_entities, raw_new_entities)
                 if alignment.status == "failed":
                     raise RuntimeError(
                         f"Page {page_index + 1} of {old_path.name}/{new_path.name} "
@@ -65,6 +66,8 @@ def _page_inputs(old_path: Path, new_path: Path) -> tuple[PageInput, ...]:
             else:
                 transform = Transform()
                 status = "not-applicable"
+            old_entities = reconstruct_callouts(raw_old_entities, SETTINGS)
+            new_entities = reconstruct_callouts(raw_new_entities, SETTINGS)
             pages.append(
                 PageInput(
                     page_index,

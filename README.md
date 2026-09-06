@@ -24,7 +24,8 @@ flowchart TD
     A["Baseline + revision PDFs"] --> B["Validate vector/text-layer content"]
     B --> C["PyMuPDF entity extraction"]
     C --> D["Deterministic anchor alignment"]
-    D --> E["Tier 1: exact match"]
+    D --> S["Semantic dimension / GD&T reconstruction"]
+    S --> E["Tier 1: exact match"]
     E --> F["Tier 2: in-place attribute match"]
     F --> G["Tier 3: structural features + Hungarian assignment"]
     G --> H{"Changed?"}
@@ -48,6 +49,21 @@ The matching order borrows the *concept* of CADMorph's tiered cascade: resolve
 cheap, certain correspondences first and reserve global assignment for ambiguous
 entities. Tier 3 uses only deterministic geometry, text, style, spatial-context,
 and distance features. It does not use CADMorph code, weights, or PyTorch.
+
+After alignment and before matching, the comparison pipeline reconstructs
+high-confidence mechanical callouts from raw PDF fragments. This is deliberately
+conservative: dimension grammar, stacked-tolerance structure, or GD&T frame
+topology and containment must prove that fragments belong together. Proximity
+can nominate candidates, but it never approves a group by itself. If any member
+changes, the dimension or GD&T frame produces one table row and its entire union
+box blinks in the viewer. Repeated callouts use unambiguous leader/feature
+attachment points during matching; materially tied candidates remain separate
+additions/removals instead of becoming a potentially false modification.
+Standalone tolerance signs emitted by CAD exporters are paired with their
+numeric spans only when baseline, direction, reading order, and ambiguity checks
+agree. GD&T cells can also be rebuilt from connected horizontal and vertical
+line segments when one exporter drawing record contains several disconnected
+objects; unrelated residual geometry remains available to normal matching.
 
 ## Install and run
 
@@ -133,6 +149,20 @@ Every reported change carries:
 - match tier and deterministic similarity score when applicable;
 - before/after text and entity IDs for traceability.
 
+Reconstructed callouts also preserve their internal member IDs and attachment
+points so downstream comparison and exports can explain how a composite was
+built. Unsupported or ambiguous layouts are left as raw entities and continue
+through the pipeline unchanged.
+
+The reconstruction thresholds live with the other analysis settings in
+`src/pdf_differences/config.py`. The `callout_*gap*` and `callout_*tolerance*`
+values control normalized candidate limits, while the attachment and ambiguity
+settings control how conservatively repeated callouts may pair. They should be
+calibrated against labeled project drawings before being loosened.
+`callout_segment_connect_tolerance` is deliberately much tighter than frame
+containment and should only absorb PDF coordinate noise. The frame height,
+cell-width, total-width, and cell-count limits bound topology reconstruction.
+
 Dimensions, GD&T, and changed geometry are relevant by default. Notes require a
 configured inspection keyword. Plain revision letters, dates, and approval
 metadata are retained but ignored by the inspection filter unless their text
@@ -150,8 +180,9 @@ ruff format --check src tests tools benchmarks
 
 The test suite covers raster rejection, extraction determinism, similarity
 alignment, all three matching tiers, moved-versus-added/removed behavior,
-mechanical categories, inspection relevance, multi-page additions, exports, and
-an end-to-end vector drawing pair.
+mechanical categories, inspection relevance, multi-page additions, exports,
+semantic dimension/GD&T reconstruction, repeated-callout ambiguity, whole-box
+viewer behavior, and end-to-end vector drawing pairs.
 
 ### SciPy reference benchmark
 
@@ -181,8 +212,9 @@ interpretation guidance.
   spatially tiny; the coverage and content thresholds are configurable in
   `ComparisonSettings`. By default, imagery covering at least 85% of a page
   requires more than five visible entities and more than 2% structured coverage.
-- Entity granularity depends on how the originating CAD software grouped paths
-  in its PDF display list.
+- Entity granularity still depends partly on how the originating CAD software
+  grouped paths in its PDF display list. Disconnected straight-line batches are
+  split locally for GD&T topology, but ambiguous or curved batches are preserved.
 - Fully transparent and all-white drawing paths are treated as non-visible CAD
   export masks, so they do not create false added-geometry rows.
 - Custom symbol fonts may expose replacement/private-use characters. Known GD&T
