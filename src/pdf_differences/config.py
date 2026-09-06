@@ -16,6 +16,9 @@ class ComparisonSettings:
     alignment_min_inlier_ratio: float = 0.55
     alignment_max_rms: float = 0.004
     alignment_max_hypotheses: int = 400
+    # Reject otherwise-consistent transforms that move the normalized page
+    # origin implausibly far from the other page's top-left corner.
+    alignment_max_origin_shift: float = 0.15
 
     # CADMorph-inspired deterministic matching cascade.
     exact_position_tolerance: float = 0.0025
@@ -33,6 +36,13 @@ class ComparisonSettings:
     title_block_x_min: float = 0.62
     title_block_y_min: float = 0.76
     preview_dpi: int = 125
+
+    # Validation heuristic for effectively scanned pages. A page is rejected
+    # when one embedded image dominates the page area and the remaining
+    # structured content is sparse or occupies too little of the page.
+    scanned_page_min_image_coverage: float = 0.85
+    scanned_page_max_structured_entities: int = 5
+    scanned_page_max_structured_coverage: float = 0.02
 
 
 SETTINGS = ComparisonSettings()

@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 
 from pdf_differences.models import Change, ChangeCategory, ChangeType, ComparisonResult
 from pdf_differences.reporting import export_annotated_pdf, export_csv, export_json
+from pdf_differences.ui.filter_combo import MultiSelectComboBox
 from pdf_differences.ui.viewer import OverlayPageViewer
 from pdf_differences.ui.worker import ComparisonWorker
 
@@ -241,17 +242,21 @@ class PdfDifferencesWindow(QMainWindow):
         )
         self.search_filter.textChanged.connect(self._populate_table)
         filters.addWidget(self.search_filter, 1)
-        self.type_filter = QComboBox()
-        self.type_filter.addItem("All change types", "")
-        for change_type in ChangeType:
-            self.type_filter.addItem(change_type.value.title(), change_type.value)
-        self.type_filter.currentIndexChanged.connect(self._populate_table)
+        self.type_filter = MultiSelectComboBox(
+            ((change_type.value.title(), change_type.value) for change_type in ChangeType),
+            all_text="All change types",
+            none_text="No change types",
+        )
+        self.type_filter.setMinimumWidth(150)
+        self.type_filter.selectionChanged.connect(self._populate_table)
         filters.addWidget(self.type_filter)
-        self.category_filter = QComboBox()
-        self.category_filter.addItem("All categories", "")
-        for category in ChangeCategory:
-            self.category_filter.addItem(category.value, category.value)
-        self.category_filter.currentIndexChanged.connect(self._populate_table)
+        self.category_filter = MultiSelectComboBox(
+            ((category.value, category.value) for category in ChangeCategory),
+            all_text="All categories",
+            none_text="No categories",
+        )
+        self.category_filter.setMinimumWidth(150)
+        self.category_filter.selectionChanged.connect(self._populate_table)
         filters.addWidget(self.category_filter)
         self.relevant_only_filter = QCheckBox("Inspection-relevant only")
         self.relevant_only_filter.stateChanged.connect(self._populate_table)
@@ -408,8 +413,8 @@ class PdfDifferencesWindow(QMainWindow):
 
     def _filtered_changes(self) -> list[Change]:
         query = self.search_filter.text().casefold()
-        selected_type = self.type_filter.currentData()
-        selected_category = self.category_filter.currentData()
+        selected_types = set(self.type_filter.checked_data())
+        selected_categories = set(self.category_filter.checked_data())
         relevant_only = self.relevant_only_filter.isChecked()
         filtered: list[Change] = []
         for change in self._changes:
@@ -429,9 +434,9 @@ class PdfDifferencesWindow(QMainWindow):
             ).casefold()
             if query and query not in searchable:
                 continue
-            if selected_type and change.change_type.value != selected_type:
+            if change.change_type.value not in selected_types:
                 continue
-            if selected_category and change.category.value != selected_category:
+            if change.category.value not in selected_categories:
                 continue
             if relevant_only and not change.inspection_relevant:
                 continue
@@ -491,8 +496,8 @@ class PdfDifferencesWindow(QMainWindow):
                 QSignalBlocker(self.relevant_only_filter),
             ):
                 self.search_filter.clear()
-                self.type_filter.setCurrentIndex(0)
-                self.category_filter.setCurrentIndex(0)
+                self.type_filter.select_all()
+                self.category_filter.select_all()
                 self.relevant_only_filter.setChecked(False)
             self._populate_table()
             row = self._row_for_change(change_id)

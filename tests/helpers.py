@@ -45,24 +45,56 @@ def make_text_only_pdf(path: Path) -> Path:
     return path
 
 
-def make_raster_only_pdf(path: Path) -> Path:
+def make_raster_only_pdf(
+    path: Path,
+    *,
+    image_rect: tuple[float, float, float, float] | None = None,
+) -> Path:
     document = fitz.open()
     page = document.new_page(width=300, height=200)
     pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
     pixmap.clear_with(225)
-    page.insert_image(page.rect, pixmap=pixmap)
+    page.insert_image(fitz.Rect(image_rect) if image_rect is not None else page.rect, pixmap=pixmap)
     document.save(path)
     document.close()
     return path
 
 
 def make_text_layer_over_image_pdf(path: Path, text: str = "SEARCHABLE NOTE") -> Path:
+    return make_image_dominant_pdf(path, overlay_texts=((30, 40, text, 10),))
+
+
+def make_hidden_text_over_image_pdf(path: Path, text: str = "HIDDEN NOTE") -> Path:
     document = fitz.open()
     page = document.new_page(width=300, height=200)
     pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
     pixmap.clear_with(225)
     page.insert_image(page.rect, pixmap=pixmap)
-    page.insert_text(fitz.Point(30, 40), text, fontsize=10)
+    page.insert_text(fitz.Point(30, 40), text, fontsize=10, render_mode=3)
+    document.save(path)
+    document.close()
+    return path
+
+
+def make_image_dominant_pdf(
+    path: Path,
+    *,
+    image_rect: tuple[float, float, float, float] | None = None,
+    overlay_texts: tuple[tuple[float, float, str, float], ...] = (),
+    overlay_rects: tuple[tuple[float, float, float, float], ...] = (),
+    overlay_lines: tuple[tuple[float, float, float, float], ...] = (),
+) -> Path:
+    document = fitz.open()
+    page = document.new_page(width=300, height=200)
+    pixmap = fitz.Pixmap(fitz.csRGB, fitz.IRect(0, 0, 8, 8), False)
+    pixmap.clear_with(225)
+    page.insert_image(fitz.Rect(image_rect) if image_rect is not None else page.rect, pixmap=pixmap)
+    for left, top, right, bottom in overlay_rects:
+        page.draw_rect(fitz.Rect(left, top, right, bottom), width=1.25)
+    for x0, y0, x1, y1 in overlay_lines:
+        page.draw_line(fitz.Point(x0, y0), fitz.Point(x1, y1), width=0.25)
+    for x, y, text, fontsize in overlay_texts:
+        page.insert_text(fitz.Point(x, y), text, fontsize=fontsize)
     document.save(path)
     document.close()
     return path

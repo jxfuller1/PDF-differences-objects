@@ -152,8 +152,7 @@ def test_table_filters_also_control_visible_regions():
 
     assert_view_matches_table()
 
-    added_index = window.type_filter.findData(ChangeType.ADDED.value)
-    window.type_filter.setCurrentIndex(added_index)
+    window.type_filter.set_checked_data({ChangeType.ADDED.value})
     assert window.table.rowCount() > 0
     assert_view_matches_table()
 
@@ -162,13 +161,22 @@ def test_table_filters_also_control_visible_regions():
     window.added_toggle.setChecked(True)
     assert_view_matches_table()
 
-    window.type_filter.setCurrentIndex(0)
-    category = result.pages[0].changes[0].category.value
-    category_index = window.category_filter.findData(category)
-    window.category_filter.setCurrentIndex(category_index)
+    window.type_filter.set_checked_data({ChangeType.ADDED.value, ChangeType.REMOVED.value})
+    assert {window.table.item(row, 1).text() for row in range(window.table.rowCount())} <= {
+        ChangeType.ADDED.value,
+        ChangeType.REMOVED.value,
+    }
     assert_view_matches_table()
 
-    window.category_filter.setCurrentIndex(0)
+    window.type_filter.select_all()
+    category = result.pages[0].changes[0].category.value
+    window.category_filter.set_checked_data({category})
+    assert_view_matches_table()
+
+    window.category_filter.unselect_all()
+    assert window.table.rowCount() == 0
+    assert not visible_region_ids()
+    window.category_filter.select_all()
     window.search_filter.setText(result.pages[0].changes[0].label)
     assert_view_matches_table()
 
@@ -210,13 +218,11 @@ def test_table_and_view_regions_select_each_other_and_center_the_change():
     assert abs(mapped_center.y() - viewport_center.y()) <= 2
 
     added = next(change for change in result.changes if change.change_type == ChangeType.ADDED)
-    modified_index = window.type_filter.findData(ChangeType.MODIFIED.value)
-    window.type_filter.setCurrentIndex(modified_index)
+    window.type_filter.set_checked_data({ChangeType.MODIFIED.value})
     assert window._row_for_change(added.id) is None
     assert not window.viewer._regions[added.id].isVisible()
 
-    added_index = window.type_filter.findData(ChangeType.ADDED.value)
-    window.type_filter.setCurrentIndex(added_index)
+    window.type_filter.set_checked_data({ChangeType.ADDED.value})
     assert window._row_for_change(added.id) is not None
     assert window.viewer._regions[added.id].isVisible()
     window.viewer.fit_to_page()
@@ -231,7 +237,7 @@ def test_table_and_view_regions_select_each_other_and_center_the_change():
 
     selected_item = window.table.item(window.table.currentRow(), 0)
     assert selected_item.data(Qt.ItemDataRole.UserRole) == added.id
-    assert window.type_filter.currentIndex() == added_index
+    assert window.type_filter.checked_data() == [ChangeType.ADDED.value]
     assert window.viewer._selected_id == added.id
     window.close()
     application.processEvents()
