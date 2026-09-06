@@ -95,6 +95,32 @@ def _compound_frame(
     )
 
 
+def _geometry(
+    entity_id: str,
+    bbox: tuple[float, float, float, float],
+    segments: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
+    *,
+    op: str = "l",
+) -> Entity:
+    x0, y0, x1, y1 = bbox
+    return Entity(
+        id=entity_id,
+        page_index=0,
+        kind=EntityKind.GEOMETRY,
+        bbox=bbox,
+        anchor=((x0 + x1) / 2.0, (y0 + y1) / 2.0),
+        content_signature="geometry",
+        shape_signature="geometry-shape",
+        style_signature="frame-style",
+        op_histogram=((op, len(segments)),),
+        primitive_count=len(segments),
+        path_length=sum(
+            ((end[0] - start[0]) ** 2 + (end[1] - start[1]) ** 2) ** 0.5 for start, end in segments
+        ),
+        geometry_segments=segments,
+    )
+
+
 def _multi_primitive_boxed_note(entity_id: str, bbox: tuple[float, float, float, float]) -> Entity:
     frame = _compound_frame(entity_id, bbox, primitive_count=1)
     x0, y0, x1, y1 = bbox
@@ -300,6 +326,81 @@ def test_vector_symbol_gdt_is_inferred_from_frame_tolerance_and_datums():
     assert not any(entity.id == "position-symbol" for entity in result)
 
 
+def test_nearby_stacked_dimensions_keep_separate_tolerance_hypotheses():
+    entities = (
+        _text("nom-b", "4.650", (0.0577, 0.3135), width=0.0227, height=0.0173),
+        _text("plus-b", "+", (0.0804, 0.3065), width=0.0049, height=0.0173),
+        _text("upper-b", ".000", (0.0853, 0.3065), width=0.0158, height=0.0173),
+        _text("minus-b", "-", (0.0815, 0.3191), width=0.0027, height=0.0173),
+        _text("lower-b", ".020", (0.0853, 0.3191), width=0.0158, height=0.0173),
+        _text("radius-a", "2X R.500", (0.0843, 0.2741), width=0.0349, height=0.0173),
+        _text("plus-a", "+", (0.1192, 0.2671), width=0.0049, height=0.0173),
+        _text("upper-a", ".050", (0.1241, 0.2671), width=0.0158, height=0.0173),
+        _text("minus-a", "-", (0.1203, 0.2797), width=0.0027, height=0.0173),
+        _text("lower-a", ".000", (0.1241, 0.2797), width=0.0158, height=0.0173),
+        _text("nearby", ".590", (0.1315, 0.3200), width=0.0204, height=0.0173),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert len(composites) == 2
+    assert {entity.text for entity in composites} == {
+        "2X R.500 +.050 / -.000",
+        "4.650 +.000 / -.020",
+    }
+    assert {frozenset(entity.callout_member_ids) for entity in composites} == {
+        frozenset({"radius-a", "plus-a", "upper-a", "minus-a", "lower-a"}),
+        frozenset({"nom-b", "plus-b", "upper-b", "minus-b", "lower-b"}),
+    }
+    assert any(entity.id == "nearby" for entity in result)
+
+
+def test_equally_plausible_tolerance_stacks_remain_unassigned():
+    entities = (
+        _text("nominal", "4.000", (0.10, 0.20), width=0.030, height=0.020),
+        _text("upper-stack", "+.010/-.000", (0.132, 0.180), width=0.065, height=0.020),
+        _text("lower-stack", "+.020/-.000", (0.132, 0.220), width=0.065, height=0.020),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category is not None for entity in result)
+    assert {entity.id for entity in result} == {"nominal", "upper-stack", "lower-stack"}
+
+
+def test_support_fragment_shared_by_two_roots_stays_raw():
+    entities = (
+        _text("shared-quantity", "2X", (0.10, 0.20), width=0.018),
+        _text("first-nominal", ".250", (0.122, 0.20), width=0.028),
+        _text("second-nominal", ".500", (0.126, 0.20), width=0.028),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category is not None for entity in result)
+    assert {entity.id for entity in result} == {
+        "shared-quantity",
+        "first-nominal",
+        "second-nominal",
+    }
+
+
+def test_dimension_core_with_embedded_tolerance_cannot_claim_a_second_stack():
+    entities = (
+        _text("core", "R.500±.010", (0.10, 0.20), width=0.070, height=0.020),
+        _text("other-stack", "+.020/-.000", (0.172, 0.20), width=0.065, height=0.020),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category is not None]
+
+    assert len(composites) == 1
+    assert composites[0].text == "R.500±.010"
+    assert composites[0].callout_member_ids == ("core",)
+    assert any(entity.id == "other-stack" for entity in result)
+
+
 def test_boxed_decimal_and_one_letter_is_not_assumed_to_be_gdt():
     entities = (
         _compound_frame("frame", (0.10, 0.30, 0.28, 0.35)),
@@ -313,9 +414,148 @@ def test_boxed_decimal_and_one_letter_is_not_assumed_to_be_gdt():
     assert {entity.id for entity in result} == {"frame", "value", "letter"}
 
 
+def test_mixed_frame_topology_accepts_one_datum_with_vector_feature_evidence():
+    entities = (
+        _compound_frame("feature-cell", (0.10, 0.30, 0.14, 0.35), primitive_count=1),
+        _geometry(
+            "rails",
+            (0.10, 0.30, 0.24, 0.35),
+            (
+                ((0.10, 0.30), (0.24, 0.30)),
+                ((0.10, 0.35), (0.24, 0.35)),
+            ),
+        ),
+        _geometry(
+            "walls",
+            (0.18, 0.30, 0.24, 0.35),
+            (
+                ((0.18, 0.30), (0.18, 0.35)),
+                ((0.24, 0.30), (0.24, 0.35)),
+            ),
+        ),
+        _vector_symbol("parallelism-symbol", (0.108, 0.308, 0.132, 0.342)),
+        _text("tol", ".010", (0.145, 0.315), width=0.030, height=0.015),
+        _text("datum-a", "A", (0.198, 0.315), width=0.015, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category == ChangeCategory.GDT]
+
+    assert len(composites) == 1
+    assert composites[0].text == ".010 | A"
+    assert {"parallelism-symbol", "tol", "datum-a"} <= set(composites[0].callout_member_ids)
+
+
+def test_one_datum_frame_accepts_a_two_object_parallelism_symbol():
+    entities = (
+        _compound_frame("frame", (0.10, 0.30, 0.25, 0.35), primitive_count=3),
+        _geometry(
+            "parallelism-symbol",
+            (0.11, 0.308, 0.14, 0.342),
+            (
+                ((0.11, 0.342), (0.125, 0.308)),
+                ((0.125, 0.342), (0.14, 0.308)),
+            ),
+        ),
+        _text("tol", ".010", (0.155, 0.315), width=0.035, height=0.015),
+        _text("datum-a", "A", (0.215, 0.315), width=0.012, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+    composites = [entity for entity in result if entity.callout_category == ChangeCategory.GDT]
+
+    assert len(composites) == 1
+    assert composites[0].text == ".010 | A"
+    assert "parallelism-symbol" not in {entity.id for entity in result}
+
+
+def test_one_datum_frame_rejects_a_single_incidental_line_as_feature_evidence():
+    entities = (
+        _compound_frame("frame", (0.10, 0.30, 0.25, 0.35), primitive_count=3),
+        _geometry(
+            "incidental-line",
+            (0.115, 0.325, 0.135, 0.325),
+            (((0.115, 0.325), (0.135, 0.325)),),
+        ),
+        _text("tol", ".010", (0.155, 0.315), width=0.035, height=0.015),
+        _text("datum-a", "A", (0.215, 0.315), width=0.012, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category == ChangeCategory.GDT for entity in result)
+
+
+def test_one_datum_frame_rejects_an_empty_trailing_table_cell():
+    entities = (
+        _compound_frame("frame", (0.10, 0.30, 0.30, 0.35), primitive_count=4),
+        _vector_symbol("parallelism-symbol", (0.108, 0.308, 0.142, 0.342)),
+        _text("tol", ".010", (0.155, 0.315), width=0.035, height=0.015),
+        _text("datum-a", "A", (0.215, 0.315), width=0.012, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category == ChangeCategory.GDT for entity in result)
+
+
+def test_one_datum_frame_rejects_a_disconnected_feature_cell():
+    entities = (
+        _compound_frame("feature-cell", (0.10, 0.30, 0.14, 0.35), primitive_count=1),
+        _geometry(
+            "remaining-frame",
+            (0.141, 0.30, 0.241, 0.35),
+            (
+                ((0.141, 0.30), (0.241, 0.30)),
+                ((0.141, 0.35), (0.241, 0.35)),
+                ((0.141, 0.30), (0.141, 0.35)),
+                ((0.191, 0.30), (0.191, 0.35)),
+                ((0.241, 0.30), (0.241, 0.35)),
+            ),
+        ),
+        _vector_symbol("parallelism-symbol", (0.108, 0.308, 0.132, 0.342)),
+        _text("tol", ".010", (0.149, 0.315), width=0.030, height=0.015),
+        _text("datum-a", "A", (0.209, 0.315), width=0.015, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category == ChangeCategory.GDT for entity in result)
+
+
+def test_one_datum_frame_rejects_vector_geometry_touching_the_cell_border():
+    entities = (
+        _compound_frame("frame", (0.10, 0.30, 0.25, 0.35), primitive_count=3),
+        _vector_symbol("border-artifact", (0.10, 0.308, 0.145, 0.342)),
+        _text("tol", ".010", (0.155, 0.315), width=0.035, height=0.015),
+        _text("datum-a", "A", (0.215, 0.315), width=0.012, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category == ChangeCategory.GDT for entity in result)
+
+
+def test_one_datum_frame_rejects_off_center_multi_stroke_artwork():
+    entities = (
+        _compound_frame("frame", (0.10, 0.30, 0.25, 0.35), primitive_count=3),
+        _vector_symbol("off-center-artwork", (0.102, 0.315, 0.112, 0.335)),
+        _text("tol", ".010", (0.155, 0.315), width=0.035, height=0.015),
+        _text("datum-a", "A", (0.215, 0.315), width=0.012, height=0.015),
+    )
+
+    result = reconstruct_callouts(entities)
+
+    assert not any(entity.callout_category == ChangeCategory.GDT for entity in result)
+
+
 def test_touching_feature_control_frames_split_at_each_semantic_marker():
     cells = tuple(
-        _compound_frame(f"cell-{index}", (0.10 + index * 0.05, 0.30, 0.15 + index * 0.05, 0.35))
+        _compound_frame(
+            f"cell-{index}",
+            (0.10 + index * 0.05, 0.30, 0.15 + index * 0.05, 0.35),
+            primitive_count=1,
+        )
         for index in range(8)
     )
     entities = (
@@ -399,7 +639,11 @@ def test_modifier_word_cannot_start_a_false_frameless_gdt_callout():
 
 def test_wide_table_row_with_gdt_words_is_not_collapsed_into_one_callout():
     cells = tuple(
-        _compound_frame(f"cell-{index}", (index * 0.10, 0.30, (index + 1) * 0.10, 0.35))
+        _compound_frame(
+            f"cell-{index}",
+            (index * 0.10, 0.30, (index + 1) * 0.10, 0.35),
+            primitive_count=1,
+        )
         for index in range(8)
     )
     entities = (

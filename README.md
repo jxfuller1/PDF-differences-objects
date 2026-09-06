@@ -61,9 +61,14 @@ attachment points during matching; materially tied candidates remain separate
 additions/removals instead of becoming a potentially false modification.
 Standalone tolerance signs emitted by CAD exporters are paired with their
 numeric spans only when baseline, direction, reading order, and ambiguity checks
-agree. GD&T cells can also be rebuilt from connected horizontal and vertical
-line segments when one exporter drawing record contains several disconnected
-objects; unrelated residual geometry remains available to normal matching.
+agree. Each nominal or complete dimension core owns a separate hypothesis and
+can claim at most one mutually best tolerance stack; tied ownership stays raw.
+GD&T cells are rebuilt from one topology containing both explicit rectangles
+and connected horizontal/vertical segments, even when an exporter splits one
+frame across drawing records. A one-datum vector-symbol frame is accepted only
+when it has contiguous cells, an exact tolerance-to-datum sequence, and a
+compact multi-stroke feature symbol fully enclosed by its first cell. Unrelated
+residual geometry remains available to normal matching.
 
 ## Install and run
 
