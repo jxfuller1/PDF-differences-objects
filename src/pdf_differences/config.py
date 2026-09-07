@@ -65,6 +65,7 @@ class ComparisonSettings:
 
     # Text/geometry interpretation.
     nearby_annotation_radius: float = 0.035
+    note_letter_threshold: int = 15
     title_block_x_min: float = 0.62
     title_block_y_min: float = 0.76
     preview_dpi: int = 125

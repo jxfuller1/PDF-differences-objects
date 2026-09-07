@@ -168,6 +168,14 @@ points so downstream comparison and exports can explain how a composite was
 built. Unsupported or ambiguous layouts are left as raw entities and continue
 through the pipeline unchanged.
 
+Plain alphabetic text is categorized as `NOTE` unless it is a recognized
+dimension fragment or stronger GD&T/revision evidence applies. A reconstructed
+group or individual text box with more than 15 alphabetic characters is always
+a `NOTE`, even when it contains a numeric value such as `.123` or another
+semantic hint; the count is made per old/new value and ignores spaces,
+punctuation, and digits. Raw vector changes remain `GEOMETRY` rather than
+inheriting the category of nearby text.
+
 The reconstruction thresholds live with the other analysis settings in
 `src/pdf_differences/config.py`. The `callout_*gap*` and `callout_*tolerance*`
 values control normalized candidate limits, while the attachment and ambiguity
@@ -178,7 +186,8 @@ containment and should only absorb PDF coordinate noise. The frame height,
 cell-width, total-width, and cell-count limits bound topology reconstruction.
 `callout_limit_width_ratio` gates unsigned limit pairs, while the
 `structural_glyph_*` values define compact line-built CAD-font glyphs for both
-prefix ownership and conservative loose-match rejection.
+prefix ownership and conservative loose-match rejection. The word-heavy note
+cutoff is available as `note_letter_threshold`.
 
 Dimensions, GD&T, and changed geometry are relevant by default. Notes require a
 configured inspection keyword. Plain revision letters, dates, and approval

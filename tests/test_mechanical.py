@@ -29,6 +29,44 @@ def test_mechanical_categories_cover_requested_parser_branches():
     assert classify_text("SCALE 1:8", (0.2, 0.2, 0.3, 0.23)) == ChangeCategory.OTHER
 
 
+def test_plain_alphabetic_label_is_a_note_but_dimension_fragment_is_not():
+    assert classify_text("EDGE OF COWLING", (0.2, 0.2, 0.3, 0.23)) == ChangeCategory.NOTE
+    assert classify_text("DIA", (0.2, 0.2, 0.3, 0.23)) == ChangeCategory.OTHER
+
+
+def test_more_than_fifteen_letters_override_a_numeric_dimension_match():
+    assert classify_text(".123 LOCATE FACES THERE", (0.2, 0.2, 0.4, 0.23)) == ChangeCategory.NOTE
+
+
+def test_letter_threshold_is_evaluated_per_old_and_new_grouping():
+    assert (
+        classify_text(
+            ".123 LOCATE FACES HERE -> .124 LOCATE FACES HERE",
+            (0.2, 0.2, 0.4, 0.23),
+        )
+        == ChangeCategory.DIMENSION
+    )
+
+
+def test_long_note_shape_overrides_any_text_grouping_hint():
+    for category_hint in (
+        ChangeCategory.DIMENSION,
+        ChangeCategory.GDT,
+        ChangeCategory.REVISION,
+    ):
+        interpreted = interpret_change(
+            EntityKind.TEXT,
+            None,
+            ".123 LOCATE FACES THERE",
+            (0.2, 0.2, 0.4, 0.23),
+            (),
+            category_hint=category_hint,
+        )
+
+        assert interpreted.category == ChangeCategory.NOTE
+        assert not interpreted.relevant
+
+
 def test_revision_cell_uses_nearby_header_context():
     header = _text("header", "REV", 0.78, 0.87)
     assert classify_text("B", (0.79, 0.89, 0.81, 0.91), (header,)) == ChangeCategory.REVISION
@@ -50,10 +88,10 @@ def test_inspection_relevance_is_explicit_and_auditable():
     assert dimension.reason and admin_revision.reason and technical_note.reason
 
 
-def test_geometry_near_dimension_inherits_dimension_category():
+def test_geometry_near_dimension_stays_geometry():
     annotation = _text("dim", "25 mm", 0.4, 0.4)
     interpreted = interpret_change(
         EntityKind.GEOMETRY, None, None, (0.42, 0.41, 0.45, 0.44), (annotation,)
     )
-    assert interpreted.category == ChangeCategory.DIMENSION
+    assert interpreted.category == ChangeCategory.GEOMETRY
     assert interpreted.relevant

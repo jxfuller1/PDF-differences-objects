@@ -45,6 +45,10 @@ _REVISION_CELL = re.compile(
     r"^(?:[A-Z]{1,2}|\d{1,3}|\d{1,2}[-/.]\d{1,2}(?:[-/.]\d{2,4})?)$",
     re.IGNORECASE,
 )
+_DIMENSION_FRAGMENT = re.compile(
+    r"^(?:R|SR|DIA\.?|THRU(?:\s+ALL)?|BOTH\s+SIDES|TYP(?:ICAL)?|MAX|MIN|REF)$",
+    re.IGNORECASE,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,6 +93,34 @@ def _contains_keyword(text: str, keywords: frozenset[str]) -> bool:
     return any(re.search(rf"\b{re.escape(keyword)}\b", upper) for keyword in keywords)
 
 
+def _text_groups(text: str) -> tuple[str, ...]:
+    """Return individual old/new payloads without counting the comparison arrow."""
+
+    return tuple(value.strip() for value in re.split(r"\s*->\s*", text) if value.strip())
+
+
+def _exceeds_note_letter_threshold(text: str, settings: ComparisonSettings) -> bool:
+    """Apply the note cutoff to each source grouping independently."""
+
+    return any(
+        sum(character.isalpha() for character in group) > settings.note_letter_threshold
+        for group in _text_groups(text)
+    )
+
+
+def _plain_alphabetic_note(text: str) -> bool:
+    """Recognize plain labels that are not standalone dimension fragments."""
+
+    groups = _text_groups(text)
+    if not groups:
+        return False
+    return all(
+        all(character.isalpha() or character.isspace() for character in group)
+        and not _DIMENSION_FRAGMENT.fullmatch(group)
+        for group in groups
+    )
+
+
 def classify_text(
     text: str,
     bbox: BBox,
@@ -101,15 +133,17 @@ def classify_text(
     neighbors = _nearby_text(bbox, page_entities, max(0.1, settings.nearby_annotation_radius * 2))
     neighborhood = " ".join([cleaned, *(entity.text for entity in neighbors[:6])])
 
+    if _exceeds_note_letter_threshold(cleaned, settings):
+        return ChangeCategory.NOTE
     if any(symbol in cleaned for symbol in _GDT_SYMBOLS) or _GDT_WORDS.search(cleaned):
         return ChangeCategory.GDT
     if _REVISION_WORDS.search(cleaned):
         return ChangeCategory.REVISION
-    revision_values = [value.strip() for value in re.split(r"\s*->\s*", cleaned)]
+    revision_values = _text_groups(cleaned)
     if _in_title_block(bbox, settings) and _REVISION_WORDS.search(neighborhood):
         if revision_values and all(_REVISION_CELL.fullmatch(value) for value in revision_values):
             return ChangeCategory.REVISION
-    if _NOTE_WORDS.search(cleaned):
+    if _NOTE_WORDS.search(cleaned) or _plain_alphabetic_note(cleaned):
         return ChangeCategory.NOTE
     dimension_match = None if _NON_DIMENSION_CONTEXT.search(cleaned) else _DIMENSION.search(cleaned)
     if dimension_match and any(character.isdigit() for character in dimension_match.group(0)):
@@ -134,17 +168,17 @@ def interpret_change(
 
     combined = " -> ".join(value for value in (before_text, after_text) if value)
     if category_hint is not None:
-        category = category_hint
+        # The configured letter cutoff is a hard note override for any text
+        # grouping, including a reconstructed callout that contains a decimal.
+        category = (
+            ChangeCategory.NOTE
+            if kind == EntityKind.TEXT and _exceeds_note_letter_threshold(combined, settings)
+            else category_hint
+        )
     elif kind == EntityKind.TEXT:
         category = classify_text(combined, bbox, page_entities, settings)
     else:
         category = ChangeCategory.GEOMETRY
-        nearby = _nearby_text(bbox, page_entities, settings.nearby_annotation_radius)
-        for annotation in nearby:
-            candidate = classify_text(annotation.text, annotation.bbox, page_entities, settings)
-            if candidate in {ChangeCategory.DIMENSION, ChangeCategory.GDT}:
-                category = candidate
-                break
 
     if category == ChangeCategory.GEOMETRY:
         return Interpretation(
