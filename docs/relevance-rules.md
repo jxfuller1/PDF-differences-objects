@@ -8,7 +8,7 @@ UI and exports.
 | --- | --- | --- |
 | `DIMENSION` | measurement, diameter/radius, units, plus/minus, min/max, reference, typical, or through modifier | Relevant |
 | `GD&T` | common Unicode symbols or words such as position, flatness, datum, profile, runout, MMC/LMC | Relevant |
-| `NOTE` | `NOTE`, general-note phrasing, material/finish/weld/deburr language | Relevant only with an inspection-impact keyword |
+| `NOTE` | alphabetic labels, text with more than 15 letters, `NOTE`, general-note phrasing, or material/finish/weld/deburr language | Relevant only with an inspection-impact keyword |
 | `REVISION` | REV/REVISION/ECN/ECO text or a nearby title-block revision cell | Ignored if administrative; relevant when technical inspection words occur |
 | `GEOMETRY` | vector path added, removed, reshaped, or moved | Relevant |
 | `OTHER` | text that matches none of the rules | Ignored pending human review |
@@ -22,8 +22,12 @@ weld/thread/torque/cleanliness language, and similar cues.
 
 - A short title-block value such as `A -> B` becomes `REVISION` only when it is
   near a `REV` or `REVISION` label.
-- A changed geometry path near a recognized dimension or GD&T span inherits
-  that annotation category.
+- The 15-letter threshold is evaluated independently for each old/new text
+  grouping and counts only alphabetic characters. It is a hard category
+  override, so a long note containing `.123` or another semantic hint remains a
+  `NOTE`.
+- Raw vector paths always remain `GEOMETRY`; dimension and GD&T geometry is
+  represented through the reconstructed callout that owns it.
 - Revision letters, dates, drawing/checking approvals, and issue metadata stay
   visible in the complete change report even when the relevance filter ignores
   them.
